@@ -22,3 +22,6 @@ results_v1/
 
 # LaTeX build artifacts (latexmk writes everything to latex/build/)
 latex/build/
+
+# Local notes not kept in the repository
+review_response.md

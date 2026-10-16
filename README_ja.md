@@ -35,7 +35,6 @@ biquality-learn 0.1.0 は scikit-learn 1.6 以降で動かない（`_validate_da
 | `results/<model>/` | 実験結果の CSV（`results.csv`、`diagnostics.csv`、`oracle_check_{10,30}.csv`、`mechanism.csv`、`hgb/lr_check.csv`） |
 | `results/summary.md` | 集計表と図 |
 | `latex/main.tex`, `latex/main_ja.tex` | 論文（英語版・日本語版）。本文の数値は `numbers.tex`、表は `tables/{en,ja}/` を読み込む（いずれも `export_latex` が生成） |
-| `review_response.md` | 論文へのレビュー指摘への対応 |
 
 ## 設定
 
