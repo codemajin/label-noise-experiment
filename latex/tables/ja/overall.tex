@@ -1,0 +1,43 @@
+\begin{tabular}{llrrrrrr}
+\toprule
+ &  & \multicolumn{3}{c}{LR} & \multicolumn{3}{c}{HGB} \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-8}
+群 & 手法 & 精度 & $\Delta$ (95\% CI) & 勝率 & 精度 & $\Delta$ (95\% CI) & 勝率 \\
+\midrule
+参照 & \texttt{oracle\_clean} & 81.10 & +7.95 {\scriptsize$\pm$1.98} & 99 & 88.87 & +11.95 {\scriptsize$\pm$1.81} & 100 \\
+ & \texttt{oracle\_trusted10/irbl} & 77.62 & +4.48 {\scriptsize$\pm$1.91} & 61 & 82.56 & +5.64 {\scriptsize$\pm$1.74} & 77 \\
+ & \texttt{oracle\_trusted30/irbl} & 79.78 & +6.64 {\scriptsize$\pm$1.94} & 80 & 85.48 & +8.56 {\scriptsize$\pm$1.80} & 94 \\
+\addlinespace
+(1) & \texttt{baseline} & 73.14 & +0.00 & -- & 76.93 & +0.00 & -- \\
+\addlinespace
+(2) & \texttt{cl\_prune} & 75.43 & +2.28 {\scriptsize$\pm$0.65} & 82 & 80.18 & +3.25 {\scriptsize$\pm$0.72} & 83 \\
+ & \texttt{cl\_cleanlearning} & 74.67 & +1.53 {\scriptsize$\pm$0.71} & 66 & 80.12 & +3.19 {\scriptsize$\pm$0.70} & 82 \\
+\addlinespace
+(3) naive & \texttt{bq/naive/irbl} & 75.87 & \textbf{+2.73} {\scriptsize$\pm$0.79} & 82 & 80.49 & \textbf{+3.56} {\scriptsize$\pm$0.65} & 90 \\
+ & \texttt{bq/naive/kpdr} & 75.00 & +1.85 {\scriptsize$\pm$0.85} & 57 & 79.32 & +2.40 {\scriptsize$\pm$0.53} & 84 \\
+ & \texttt{bq/naive/kkmm} & 74.39 & +1.24 {\scriptsize$\pm$0.82} & 43 & 79.95 & +3.03 {\scriptsize$\pm$0.64} & 86 \\
+ & \texttt{bq/naive/glc} & 48.78 & $-$24.36 {\scriptsize$\pm$4.40} & 0 & 40.24 & $-$36.69 {\scriptsize$\pm$4.80} & 0 \\
+ & \texttt{bq/naive/plugin} & 42.77 & $-$30.37 {\scriptsize$\pm$4.65} & 6 & 39.70 & $-$37.23 {\scriptsize$\pm$5.63} & 10 \\
+ & \texttt{bq/naive/irlnl} & 46.29 & $-$26.86 {\scriptsize$\pm$4.66} & 2 & 40.58 & $-$36.34 {\scriptsize$\pm$6.25} & 7 \\
+\addlinespace
+(3) random & \texttt{bq/random/trusted\_only} & 74.92 & +1.77 {\scriptsize$\pm$0.77} & 58 & 78.23 & +1.31 {\scriptsize$\pm$0.81} & 56 \\
+ & \texttt{bq/random/irbl} & 75.49 & +2.35 {\scriptsize$\pm$0.85} & 63 & 80.14 & +3.22 {\scriptsize$\pm$0.79} & 81 \\
+ & \texttt{bq/random/kpdr} & 75.00 & +1.86 {\scriptsize$\pm$0.78} & 61 & 78.88 & +1.95 {\scriptsize$\pm$0.44} & 84 \\
+ & \texttt{bq/random/kkmm} & 74.20 & +1.05 {\scriptsize$\pm$0.70} & 50 & 78.67 & +1.74 {\scriptsize$\pm$0.65} & 66 \\
+ & \texttt{bq/random/glc} & 68.78 & $-$4.37 {\scriptsize$\pm$1.87} & 21 & 65.08 & $-$11.84 {\scriptsize$\pm$1.72} & 1 \\
+ & \texttt{bq/random/plugin} & 64.25 & $-$8.89 {\scriptsize$\pm$2.61} & 3 & 65.11 & $-$11.81 {\scriptsize$\pm$2.76} & 0 \\
+ & \texttt{bq/random/irlnl} & 63.88 & $-$9.27 {\scriptsize$\pm$2.02} & 7 & 74.61 & $-$2.32 {\scriptsize$\pm$1.93} & 61 \\
+\addlinespace
+(3) topconf & \texttt{bq/topconf/trusted\_only} & 72.79 & $-$0.35 {\scriptsize$\pm$1.43} & 43 & 75.99 & $-$0.93 {\scriptsize$\pm$1.16} & 39 \\
+ & \texttt{bq/topconf/irbl} & 73.84 & +0.70 {\scriptsize$\pm$1.39} & 47 & 79.34 & +2.41 {\scriptsize$\pm$0.97} & 67 \\
+ & \texttt{bq/topconf/kpdr} & 72.00 & $-$1.15 {\scriptsize$\pm$1.44} & 36 & 78.76 & +1.83 {\scriptsize$\pm$0.68} & 63 \\
+ & \texttt{bq/topconf/kkmm} & 71.78 & $-$1.37 {\scriptsize$\pm$1.15} & 30 & 77.53 & +0.60 {\scriptsize$\pm$1.03} & 48 \\
+ & \texttt{bq/topconf/glc} & 55.58 & $-$17.57 {\scriptsize$\pm$4.43} & 12 & 61.81 & $-$15.12 {\scriptsize$\pm$2.72} & 1 \\
+ & \texttt{bq/topconf/plugin} & 56.79 & $-$16.36 {\scriptsize$\pm$4.49} & 9 & 61.74 & $-$15.18 {\scriptsize$\pm$3.45} & 1 \\
+ & \texttt{bq/topconf/irlnl} & 55.28 & $-$17.86 {\scriptsize$\pm$4.52} & 19 & 73.14 & $-$3.78 {\scriptsize$\pm$2.36} & 58 \\
+\addlinespace
+(4) & \texttt{cl\_weight/self\_confidence} & 75.46 & +2.32 {\scriptsize$\pm$0.58} & 89 & 78.92 & +1.99 {\scriptsize$\pm$0.36} & 87 \\
+ & \texttt{cl\_weight/normalized\_margin} & 74.98 & +1.83 {\scriptsize$\pm$0.51} & 81 & 78.68 & +1.76 {\scriptsize$\pm$0.31} & 87 \\
+ & \texttt{cl\_feature} & 67.28 & $-$5.86 {\scriptsize$\pm$1.23} & 11 & 80.38 & +3.46 {\scriptsize$\pm$0.91} & 80 \\
+\bottomrule
+\end{tabular}

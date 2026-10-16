@@ -1,0 +1,6 @@
+* text=auto
+# Shell scripts and latexmk config run in WSL/Linux and must keep LF line endings
+*.sh text eol=lf
+latex/latexmkrc text eol=lf
+*.pdf binary
+*.png binary

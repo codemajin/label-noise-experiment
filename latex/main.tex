@@ -1,0 +1,473 @@
+\documentclass[a4paper,10pt]{article}
+
+\usepackage[margin=24mm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage[backend=biber,style=numeric-comp,sorting=none,maxnames=4,giveninits=true]{biblatex}
+\usepackage[hidelinks]{hyperref}
+
+\addbibresource{references.bib}
+\captionsetup{font=small,labelfont=bf}
+\setlist{itemsep=0.2em,topsep=0.4em}
+\setlength{\emergencystretch}{3em}
+
+\input{numbers.tex}
+
+\newcommand{\method}[1]{\texttt{#1}}
+\newcommand{\cl}{\textsf{cleanlab}}
+\newcommand{\bq}{\textsf{biquality-learn}}
+
+\title{Pseudo-Biquality Learning with Confident Learning:\\An Empirical Study of Label-Noise Handling without Human Verification}
+\author{codemajin}
+\date{October 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Biquality learning handles label noise by using both a small trusted dataset whose labels are guaranteed to be correct and a large untrusted dataset that may contain noise.
+Preparing the trusted data, however, usually requires human verification.
+In this study we automatically build a trusted/untrusted split from the label-error flags and quality scores produced by \cl{}, an implementation of Confident Learning (pseudo-biquality learning), and feed it to the algorithms of \bq{}.
+We compare this approach with training on the data as is, pruning with \cl{} (including \cl{}'s standard CleanLearning), and using the quality scores as sample weights or features.
+We evaluate on \NCond{} conditions (3 tabular datasets, 3 kinds of synthetic noise, 2 noise rates, and 5 seeds) with two base models, logistic regression and gradient boosting.
+Pseudo trusted data combined with IRBL achieved the highest mean accuracy among the methods that use no human input (\DLRNaiveIRBL{}~pt over the baseline for LR and \DHGBNaiveIRBL{}~pt for HGB).
+Its advantage over simple pruning, however, was only 0.3--0.5~pt, at about three times the training time.
+CleanLearning, which adds per-class reweighting, did not outperform simple pruning.
+In contrast, the transition-matrix methods GLC, Plugin, and IRLNL lost up to 37~pt of accuracy when combined with pseudo trusted data.
+We confirm that a split based on \cl{}'s flags concentrates mislabeled samples in the untrusted set, which makes the diagonal of the transition matrix severely underestimated.
+Choosing the samples with the highest quality scores as trusted lowered accuracy even though it lowered the error rate of the trusted set.
+As a control, when we simulate human verification of 30\% of the training data, IRBL outperforms the best automatic method by \PLROracleThirtyVsNaiveIrbl{}~pt (LR) and \PHGBOracleThirtyVsNaiveIrbl{}~pt (HGB) on average.
+\end{abstract}
+
+\section{Introduction}
+
+Labels in supervised learning often contain errors caused by annotation mistakes or ambiguity (label noise)~\cite{frenay2014survey,song2023survey}.
+Approaches to label noise fall into two broad families.
+One detects mislabeled samples and removes or corrects them; a representative example is Confident Learning~\cite{northcutt2021confident} and its implementation \cl{}.
+The other assumes noise and corrects the training procedure; among these, biquality learning~\cite{nodet2023framework} uses a small trusted dataset whose labels are guaranteed to be correct as a guide for reweighting or correcting the loss of a large untrusted dataset.
+\bq{}~\cite{nodet2023bqlearn} is a library that implements the algorithms of this framework with a scikit-learn~\cite{pedregosa2011sklearn} compatible interface.
+
+The weakness of biquality learning is that building the trusted data requires human verification.
+A natural idea is therefore to skip the human step by treating the samples that \cl{} judges to be ``error-free'' as trusted.
+\cl{}'s judgment, however, relies on model predictions, so the resulting trusted set is biased toward ``samples the model can predict confidently''.
+Moreover, many biquality methods implicitly assume that the trusted and untrusted data are drawn from the same distribution.
+Whether this combination actually works is therefore not obvious.
+
+The goal of this study is to answer the following questions under the condition that no human input is used at all.
+\begin{description}[leftmargin=2.5em,style=nextline]
+  \item[RQ1] Does feeding pseudo trusted/untrusted sets built from \cl{}'s output into \bq{} improve accuracy over pruning with \cl{}?
+  \item[RQ2] How does the way the pseudo trusted set is chosen (flags only, top quality scores, or random) affect the results?
+  \item[RQ3] Is it effective to use \cl{}'s quality scores as sample weights or features?
+  \item[RQ4] What mechanisms produce these results?
+\end{description}
+
+Our contributions are as follows.
+\begin{itemize}
+  \item We combine three pseudo-biquality splitting schemes with six \bq{} algorithms (plus training on the trusted set only) and compare them with pruning, CleanLearning, weighting, and feature augmentation on \NCond{} conditions $\times$ 2 models.
+  \item We show that weighting methods (IRBL) match or exceed pruning while transition-matrix methods break down badly, and we explain why from measurements of the estimated transition matrices, the error rates of the untrusted sets, and the IRBL weights.
+  \item With control experiments that provide genuinely clean trusted sets of two sizes (10\% and 30\%), we separate the degradation caused by pseudo trusted data, the effect of the trusted-set size, and the weaknesses of the methods themselves.
+\end{itemize}
+
+\section{Related Work}
+
+\paragraph{Learning with label noise}
+Classification under label noise has long been studied. Noise is broadly divided into class-conditional noise, whose flip probabilities depend only on the class, and instance-dependent noise, which also depends on the input~\cite{frenay2014survey,song2023survey}.
+
+\paragraph{Detecting mislabeled examples}
+Confident Learning~\cite{northcutt2021confident} estimates the joint distribution of noisy and true labels (the confident joint) from cross-validated out-of-sample predicted probabilities and the given labels, and enumerates candidate label errors.
+\cl{} additionally provides label quality scores such as the predicted probability of the given label (self-confidence), and \texttt{CleanLearning}, which removes the candidate errors and retrains with weights based on the per-class noise rates.
+George et al.~\cite{george2024probing} organize many mislabeled-example detectors, including Confident Learning, under a unified view as ``probes'' of trained models and benchmark them on both completely-at-random and not-at-random noise.
+We evaluate the outputs of such detectors not by their detection accuracy but by their usefulness as input to downstream biquality learning.
+
+\paragraph{Selection bias of confidence-based filtering}
+Swayamdipta et al.~\cite{swayamdipta2020cartography} categorize samples as ``easy-to-learn'', ``ambiguous'', or ``hard-to-learn'' from the model's confidence during training and its variability, and show that mislabeled examples concentrate in the hard-to-learn region while ambiguous examples contribute to generalization.
+Their observation that selecting only high-confidence samples biases the selection toward easy examples bears directly on how we choose the trusted set (RQ2).
+
+\paragraph{Biquality learning}
+In biquality learning~\cite{nodet2023framework}, the training data consist of a trusted set $\mathcal{T}$ and an untrusted set $\mathcal{U}$.
+The methods implemented in \bq{} fall into two families.
+Weighting methods assign a weight to each sample of $\mathcal{U}$ to bring it closer to the distribution of $\mathcal{T}$: IRBL~\cite{nodet2021irbl}, K-PDR, which estimates density ratios with a probabilistic classifier~\cite{bickel2007discriminative,nodet2023framework}, and K-KMM, which uses kernel mean matching~\cite{huang2006kmm,nodet2023framework}.
+Transition-matrix methods estimate the label transition matrix $T_{ij} = P(\tilde{y}=j \mid y=i)$ and correct with it: GLC corrects the loss~\cite{hendrycks2018glc}, Plugin corrects only at prediction time~\cite{zhang2021plugin}, and IRLNL derives importance weights from the transition matrix~\cite{liu2016irlnl}.
+
+Of the three transition-matrix methods, the original Plugin and IRLNL estimate $T$ from noisy data alone, for example via anchor points.
+\bq{} adapts them to the biquality setting by estimating $T$ with the same \texttt{gold} estimator as GLC.
+That is, a probabilistic classifier trained on $\mathcal{U}$ is evaluated on $\mathcal{T}$, and for each label $i$ in $\mathcal{T}$ the predicted probabilities of the noisy labels are averaged to form row $i$ of $T$.
+IRLNL uses the ratio of the clean class posterior obtained from this $T$ to the noisy class posterior as the weights of $\mathcal{U}$, and gives weight 1 to $\mathcal{T}$.
+All three methods therefore assume that $\mathcal{U}$ is representative of the noise distribution of the whole dataset, and they all break down together when this assumption fails.
+
+\section{Method}
+
+\subsection{Problem setting}
+The labels $\tilde{y}_i \in \{1,\dots,K\}$ of the training data $\mathcal{D} = \{(x_i, \tilde{y}_i)\}_{i=1}^{n}$ contain errors, and the true labels $y_i$ are not observed.
+Without any human verification, we learn a classifier from $\mathcal{D}$ alone.
+
+\subsection{Output of \cl{}}
+We train the base model with stratified 5-fold cross-validation to obtain out-of-sample predicted probabilities $\hat{p}_i \in \Delta^{K-1}$.
+Passing these to \cl{} yields the set of samples flagged as label errors, $\mathcal{I} \subset \{1,\dots,n\}$ (\texttt{find\_label\_issues} with default settings), and label quality scores $s_i$.
+We use two scores: self-confidence $s_i = \hat{p}_{i,\tilde{y}_i} \in [0,1]$ and normalized margin $s_i = (\hat{p}_{i,\tilde{y}_i} - \max_{k \neq \tilde{y}_i} \hat{p}_{i,k} + 1)/2 \in [0,1]$.
+The latter follows \cl{}'s definition and maps the margin to $[0,1]$.
+Wherever $s_i$ is used outside \method{cl\_weight/*} (\method{topconf} and \method{cl\_feature}), we use self-confidence.
+
+\subsection{Methods compared}
+All methods learn from $\mathcal{D}$ alone.
+The numbers denote groups of methods and correspond to the groups in Table~\ref{tab:overall}.
+\begin{enumerate}[label=(\arabic*)]
+  \item \method{baseline}: train on $\mathcal{D}$ as is.
+  \item \method{cl\_prune}: train on $\mathcal{D} \setminus \mathcal{I}$ with uniform weights.\\
+        \method{cl\_cleanlearning}: use \cl{}'s \texttt{CleanLearning}. Because it receives the same $\hat{p}_i$, it removes exactly the same samples as \method{cl\_prune}, and then trains on the remaining samples with class $k$ weighted by the inverse of the diagonal of the noise matrix estimated from the confident joint, $1/\max(\hat{P}(\tilde{y}=k \mid y=k), 10^{-3})$. The only difference between the two is this per-class reweighting.
+  \item \method{bq/<split>/<algo>}: build a pseudo trusted/untrusted split (Section~\ref{sec:split}) and train with a \bq{} algorithm. The algorithms are IRBL, K-PDR, K-KMM, GLC, Plugin, IRLNL, and \method{trusted\_only}, which trains on $\mathcal{T}$ alone with uniform weights. All transition-matrix methods use the \texttt{gold} estimator. With the \method{naive} split, $\mathcal{T} = \mathcal{D} \setminus \mathcal{I}$, so \method{bq/naive/trusted\_only} is identical to \method{cl\_prune} and is omitted from the tables.
+  \item \method{cl\_weight/*}: train on $\mathcal{D}$ with $s_i$ as sample weights.\\
+        \method{cl\_feature}: train on the features $[x_i, s_i]$ and feed $s=1$ at inference. $x_i$ is standardized, while $s_i$ (self-confidence) is appended unstandardized in $[0,1]$. Because $s$ is not available at inference, we condition on the upper end of its range (the most reliable label) instead.
+\end{enumerate}
+As references we report \method{oracle\_clean}, trained on the true labels, and \method{oracle\_trusted10/irbl} and \method{oracle\_trusted30/irbl}, which restore the true labels of 10\% or 30\% of the training samples chosen uniformly at random (without stratification), treat them as trusted and all the rest as untrusted, and train with IRBL.
+The latter correspond to the intended use of \bq{}: ``verify a small amount by hand''.
+We chose 10\% as a realistic verification budget and 30\% to match the trusted-set size of the pseudo splits ($\tau = 0.3$).
+Both are built from the same uniform random draws, so the 10\% trusted set is contained in the 30\% one.
+
+\subsection{Pseudo trusted/untrusted splits}\label{sec:split}
+Let $\mathcal{D}_c = \{i : \tilde{y}_i = c\}$ be the samples of class $c$ and $\mathcal{C}_c = \mathcal{D}_c \setminus \mathcal{I}$ those among them that were not flagged.
+\begin{itemize}
+  \item \method{naive}: $\mathcal{T} = \{1,\dots,n\} \setminus \mathcal{I}$, $\mathcal{U} = \mathcal{I}$.
+  \item \method{topconf}: for each class, the $k_c$ samples of $\mathcal{C}_c$ with the largest $s_i$ (self-confidence) form $\mathcal{T}$, and all the rest form $\mathcal{U}$.
+  \item \method{random}: for each class, $k_c$ samples drawn at random from $\mathcal{C}_c$ form $\mathcal{T}$, and all the rest form $\mathcal{U}$.
+\end{itemize}
+Here $k_c = \min(\max(1, \mathrm{round}(\tau |\mathcal{D}_c|)), |\mathcal{C}_c|)$ and $\tau = 0.3$.
+In our experiments $|\mathcal{C}_c| \geq \tau |\mathcal{D}_c|$ holds in almost all conditions, so $\mathcal{T}$ of \method{topconf} and \method{random} covers about 30\% of the training data.
+In contrast, $\mathcal{T}$ of \method{naive} covers \NaiveTSizeMinLR--\NaiveTSizeMaxLR\% (LR) and \NaiveTSizeMinHGB--\NaiveTSizeMaxHGB\% (HGB) of the training data depending on the condition.
+\method{topconf} and \method{random} preserve the class proportions and are designed so that $\mathcal{U}$ is not made up only of flagged samples.
+\method{topconf} lowers the error rate of the trusted set at the cost of stronger selection bias, and \method{random} does the opposite.
+In both, however, all of $\mathcal{I}$ goes into $\mathcal{U}$, so the error rate of $\mathcal{U}$ exceeds the overall noise rate $\rho$ (Section~\ref{sec:diag}).
+
+\section{Experimental Setup}
+
+\paragraph{Datasets}
+We use three datasets:
+digits (1,797 samples, 64 features, 10 classes);
+synth, synthetic data from \texttt{make\_classification} (\texttt{n\_samples=8000, n\_features=20, n\_informative=10, n\_redundant=4, n\_classes=6, n\_clusters\_per\_class=1, class\_sep=1.0, random\_state=0});
+and 12,000 samples drawn by stratified sampling from covtype~\cite{blackard1999covtype} (54 features of which 44 are binary, 7 classes, strongly imbalanced).
+For each seed, each dataset is split with stratification into 70\% training and 30\% test data.
+Standardization is fitted once on the whole 70\% training split before cross-validation and applied to all features, including the binary features of covtype.
+Noise is added only to the training data; test labels are always the true labels.
+
+\paragraph{Noise}
+For a noise rate $\rho \in \{0.2, 0.4\}$, we flip exactly $\mathrm{round}(\rho n)$ labels to a different class.
+\begin{itemize}
+  \item symmetric: randomly chosen samples are flipped to a uniformly random other class.
+  \item pair: a single random permutation $\pi$ without fixed points is fixed, and randomly chosen samples are flipped to $\pi(y)$.
+  \item instance: using the predicted probabilities on the training data of a logistic regression $f^*$ (\texttt{max\_iter=2000}) trained on the true labels of the 70\% training split, samples are chosen by weighted sampling without replacement with probability proportional to $1 - f^*(x)_y + 10^{-3}$ and flipped to $\arg\max_{k \neq y} f^*(x)_k$. As with real annotation errors, the more confusing a sample is, the more likely it is to be mislabeled, and as a confusable class.
+\end{itemize}
+Because the instance noise is generated with LR, it concentrates near the decision boundary of LR.
+This noise is hard to detect when the base model is LR, so the conditions are not symmetric between LR and HGB (Section~\ref{sec:limit}).
+
+\paragraph{Models and implementation}
+The base models are logistic regression (LR, \texttt{max\_iter=2000}) and HistGradientBoosting (HGB, \texttt{max\_iter=200}, learning rate 0.05).
+We originally changed the HGB learning rate to 0.05 because training with the default of 0.1 was unstable on covtype.
+This decision was made by looking at the accuracy with true labels on the test data of the seed-0 split (0.61 at 0.1, 0.79 at 0.05), so the choice referred to the test data.
+We therefore repeated the comparison post hoc with 5-fold cross-validation inside the training split of each seed (true labels, no test data; Table~\ref{tab:hgb-lr} in the appendix).
+On covtype the mean accuracy was \CovLRHigh\% at a learning rate of 0.1 (minimum 72.1\%) and \CovLRLow\% at 0.05, confirming that the same choice is made without the test data.
+On digits and synth the difference was at most 0.4~pt.
+Note that this choice is a check of the base model's stability without noise, not a per-method tuning of the noise-handling methods.
+
+The two probabilistic classifiers of IRBL and the classifier fitted on $\mathcal{U}$ in the \texttt{gold} estimator are the base model itself (LR, or HGB with learning rate 0.05).
+K-PDR uses logistic regression for density-ratio estimation regardless of the base model.
+K-KMM uses a batch size of 1,000.
+All other hyperparameters are left at their defaults without tuning.
+The implementation uses Python 3.11, \cl{} 2.9.0, \bq{} 0.1.0, and scikit-learn 1.5.2.
+Because \bq{} 0.1.0 does not work with scikit-learn 1.6 or later, scikit-learn is pinned to the 1.5 series.
+
+\paragraph{Evaluation}
+For each of the \NCond{} conditions (3 datasets $\times$ 3 noise kinds $\times$ 2 noise rates $\times$ 5 seeds), we compute the test accuracy and its difference $\Delta$ (in points) from \method{baseline} under the same condition.
+The tables report the mean of $\Delta$ over the \NCond{} conditions, the half-width of its 95\% confidence interval ($1.96 \times$ standard error), and the fraction of conditions with $\Delta > 0$ (win rate).
+Since the conditions are not independent of each other, the confidence intervals should be read as rough guides.
+
+\section{Results}
+
+\subsection{Overall comparison}
+
+Table~\ref{tab:overall} and Figure~\ref{fig:delta} show the averages over all conditions.
+The mean baseline accuracy was \AccLRBaseline\% for LR and \AccHGBBaseline\% for HGB.
+Among the methods that use no human input, \method{bq/naive/irbl} had the largest $\Delta$ for both models (LR \DLRNaiveIRBL{}, HGB \DHGBNaiveIRBL{}), followed by \method{cl\_prune} (LR \DLRPrune{}, HGB \DHGBPrune{}).
+\method{cl\_cleanlearning} reached LR \DLRCleanLearning{} and HGB \DHGBCleanLearning{}, not exceeding \method{cl\_prune}.
+In contrast, the transition-matrix methods degraded sharply with the \method{naive} split: LR \DLRNaiveGLC{} to \DLRNaivePlugin{}, HGB \DHGBNaiveIRLNL{} to \DHGBNaivePlugin{}.
+The reference \method{oracle\_trusted10/irbl} reached LR \DLROracleTen{} and HGB \DHGBOracleTen{}, and \method{oracle\_trusted30/irbl} reached LR \DLROracleThirty{} and HGB \DHGBOracleThirty{}.
+
+\begin{table}[tbp]
+  \centering
+  \caption{Means over all \NCond{} conditions. Acc.\ is the test accuracy (\%), $\Delta$ is the difference from \method{baseline} (pt) with the half-width of its 95\% confidence interval, and Win is the percentage of conditions with $\Delta>0$. Bold marks the method with the largest $\Delta$ excluding the references. \method{bq/naive/trusted\_only} is identical to \method{cl\_prune} and is omitted.}
+  \label{tab:overall}
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \input{tables/en/overall.tex}
+\end{table}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/delta_vs_baseline.pdf}
+  \caption{Mean accuracy difference from \method{baseline} with 95\% confidence intervals (left: LR, right: HGB).}
+  \label{fig:delta}
+\end{figure}
+
+\subsection{Paired comparisons}
+Table~\ref{tab:paired} shows accuracy differences between methods under identical conditions.
+\method{bq/naive/irbl} outperformed \method{cl\_prune} by \PLRNaiveIrblVsPrune{}~pt for LR and \PHGBNaiveIrblVsPrune{}~pt for HGB on average, with win rates of \PLRNaiveIrblVsPruneWin\% and \PHGBNaiveIrblVsPruneWin\%, respectively.
+The differences are small, but the confidence intervals exclude 0 for both models.
+The training time was \TimeLRRatio{} times that of \method{cl\_prune} for LR and \TimeHGBRatio{} times for HGB.
+
+Relative to \method{cl\_prune}, \method{cl\_cleanlearning} scored \PLRCLVsPrune{}~pt for LR (win rate \PLRCLVsPruneWin\%) and \PHGBCLVsPrune{}~pt for HGB (win rate \PHGBCLVsPruneWin\%).
+Per-class reweighting lowered accuracy for LR and had almost no effect for HGB.
+As a result, the gap between \method{bq/naive/irbl} and \method{cl\_cleanlearning} (LR \PLRNaiveIrblVsCL{}, HGB \PHGBNaiveIrblVsCL{}~pt) is larger than that to \method{cl\_prune}.
+
+Among the splitting schemes, \method{random} consistently outperformed \method{topconf} (with IRBL, LR \PLRRandomIrblVsTopIrbl{} and HGB \PHGBRandomIrblVsTopIrbl{}~pt; with \method{trusted\_only}, LR \PLRRandomTVsTopT{} and HGB \PHGBRandomTVsTopT{}~pt).
+\method{naive} slightly outperformed \method{random} (with IRBL, LR \PLRNaiveIrblVsRandomIrbl{} and HGB \PHGBNaiveIrblVsRandomIrbl{}~pt).
+Looking at the gain of IRBL over training on $\mathcal{T}$ alone within each split, the gain with \method{random} is LR \PLRRandomIrblVsRandomT{} and HGB \PHGBRandomIrblVsRandomT{}~pt, larger than the gain with \method{naive} (the difference from \method{cl\_prune}).
+In other words, the advantage of \method{naive} is due less to IRBL's weighting than to the larger size of $\mathcal{T}$ (Section~\ref{sec:discussion}).
+
+Using the quality score as weights, \method{cl\_weight/self\_confidence} was on par with \method{cl\_prune} for LR (\PLRWeightVsPrune) and worse for HGB (\PHGBWeightVsPrune).
+Using it as a feature, \method{cl\_feature} was on par with \method{cl\_prune} for HGB (\PHGBFeatureVsPrune) but much worse for LR (\PLRFeatureVsPrune).
+
+\begin{table}[tbp]
+  \centering
+  \caption{Accuracy differences (pt) between method A and method B under identical conditions. A win is the percentage of conditions in which A outperformed B. Differences are computed from unrounded accuracies, so they may differ by 0.01~pt from the differences of the rounded values in Table~\ref{tab:overall}.}
+  \label{tab:paired}
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \input{tables/en/paired.tex}
+\end{table}
+
+\subsection{Differences by noise kind}
+Table~\ref{tab:noise} shows $\Delta$ by noise kind and rate.
+The automatic methods improved most under pair noise: at a noise rate of 40\%, \method{bq/naive/irbl} gained +6.91~pt for LR and +7.48~pt for HGB.
+Under the same condition, however, \method{oracle\_trusted10/irbl} gained +19.94 (LR) and +21.40~pt (HGB), and \method{oracle\_trusted30/irbl} gained +21.95 (LR) and +24.22~pt (HGB), showing that using human-verified samples as the trusted set is extremely effective.
+Under instance noise the automatic methods improved little; for LR, no method gained more than 1~pt.
+For LR at instance 40\%, \method{bq/naive/irbl} ($-$0.18) fell below \method{cl\_prune} (+0.76) (see Section~\ref{sec:mech} for why).
+The shortfall of \method{cl\_cleanlearning} relative to \method{cl\_prune} was largest for LR under symmetric noise (+0.68 vs.\ +2.21 at 40\%).
+
+On average over all conditions \method{oracle\_trusted10/irbl} outperformed \method{bq/naive/irbl}, but its per-condition win rate was below half (LR \PLROracleTenVsNaiveIrblWin\%, HGB \PHGBOracleTenVsNaiveIrblWin\%), and most of the mean difference comes from pair noise at 40\%.
+In contrast, with the trusted-set size matched at 30\%, \method{oracle\_trusted30/irbl} outperformed \method{bq/naive/irbl} by \PLROracleThirtyVsNaiveIrbl{}~pt for LR (win rate \PLROracleThirtyVsNaiveIrblWin\%) and \PHGBOracleThirtyVsNaiveIrbl{}~pt for HGB (win rate \PHGBOracleThirtyVsNaiveIrblWin\%).
+Increasing the trusted set from 10\% to 30\% improved accuracy in almost every condition (win rate LR \PLROracleThirtyVsOracleTenWin\%, HGB \PHGBOracleThirtyVsOracleTenWin\%).
+
+\begin{table}[tbp]
+  \centering
+  \caption{$\Delta$ by noise kind and rate (pt, mean over 3 datasets $\times$ 5 seeds). Main methods only. The first row is the accuracy of \method{baseline} (\%). All methods are listed in Table~\ref{tab:noise-all} in the appendix.}
+  \label{tab:noise}
+  \footnotesize
+  \input{tables/en/by_noise_key.tex}
+\end{table}
+
+\subsection{Detection performance of \cl{} and quality of the splits}\label{sec:diag}
+Table~\ref{tab:diag} shows the detection performance of \cl{} and the error rates within each split.
+Recall was high, 84--91\%, under symmetric noise and pair noise at 20\%, but only \InstRecallMin--\InstRecallMax\% under instance noise (range of means per dataset and model).
+The error rate of the \method{naive} untrusted set (= the flagged samples) was \NaiveUntrustedMin--\NaiveUntrustedMax\%, and 2--26\% of the labels in the \method{naive} trusted set were still wrong, depending on the condition.
+The untrusted sets of \method{random} and \method{topconf} also have error rates above $\rho$ because all of $\mathcal{I}$ goes into them (23--28\% at $\rho = 20\%$ and 45--54\% at $\rho = 40\%$).
+The trusted set of \method{topconf} has a lower error rate than that of \method{random} (e.g., 1.2\% vs.\ 3.1\% for HGB with symmetric noise at 20\%).
+Nevertheless, as shown above, \method{random} achieved higher accuracy.
+
+\begin{table}[tbp]
+  \centering
+  \caption{Detection performance of \cl{} and error rates of the pseudo splits (\%, mean over 3 datasets $\times$ 5 seeds). Flagged is the fraction of samples flagged as errors. T is trusted and U is untrusted. For \method{naive}, $\mathcal{U} = \mathcal{I}$, so the error rate of naive U equals the precision, and the size of naive T is 1 $-$ the flagged fraction.}
+  \label{tab:diag}
+  \footnotesize
+  \setlength{\tabcolsep}{3.5pt}
+  \input{tables/en/diagnostics.tex}
+\end{table}
+
+\subsection{Control experiment: genuine trusted data}\label{sec:oracle}
+To separate the degradation caused by pseudo trusted data from the performance of the methods themselves, we restored the true labels of 10\% or 30\% of the samples chosen uniformly at random, used them as the trusted set, and evaluated the same algorithms (Table~\ref{tab:oracle}).
+The weighting methods IRBL and K-PDR performed best with oracle data and kept positive gains with naive and random.
+\method{trusted\_only} reached only \OHGBTRUSTEDONLYTen{} for HGB with 10\% oracle data, but LR \OLRTRUSTEDONLYThirty{} and HGB \OHGBTRUSTEDONLYThirty{} with 30\%, so the size of the trusted set strongly affected the result.
+
+The transition-matrix methods fell below \method{baseline} in most cases even with oracle data (GLC: LR \OLRGLCTen{} and HGB \OHGBGLCTen{} at 10\%, LR \OLRGLCThirty{} and HGB \OHGBGLCThirty{} at 30\%).
+The exception was IRLNL with HGB, which improved by \OHGBIRLNLThirty{} at 30\%.
+The degradation with \method{naive} ($-$24 to $-$37~pt), however, was far larger than with oracle data.
+That is, the transition-matrix methods are not strong in our setting to begin with, and pseudo trusted data makes them much worse.
+
+We initially hypothesized that the transition-matrix methods are weak even with oracle data because estimation is unstable for minority classes with few trusted samples (covtype).
+The breakdown by dataset (Table~\ref{tab:oracle-breakdown}) shows that the degradation of Plugin is concentrated on covtype (around $-$20~pt for LR), consistent with this hypothesis.
+GLC and IRLNL, however, also degrade for LR on the class-balanced synth (GLC down to $-$4.3~pt, IRLNL $-$18 to $-$24~pt under symmetric and instance noise), which minority classes alone cannot explain.
+Since GLC's estimate of the diagonal barely changed when the trusted set grew from 10\% to 30\% (Section~\ref{sec:mech}), bias in the estimate rather than the number of samples appears to be the main factor.
+
+\begin{table}[tbp]
+  \centering
+  \caption{$\Delta$ (pt) by how the trusted set is built. naive and random are pseudo trusted sets from \cl{}; oracle10 and oracle30 are genuine trusted sets in which 10\% or 30\% of the samples, chosen uniformly at random, have their true labels restored. $^\dagger$ \method{bq/naive/trusted\_only} is identical to \method{cl\_prune}, so its value is shown.}
+  \label{tab:oracle}
+  \footnotesize
+  \input{tables/en/oracle.tex}
+\end{table}
+
+\begin{table}[tbp]
+  \centering
+  \caption{$\Delta$ (pt) with genuine trusted data, broken down by dataset and noise (mean over 2 noise rates $\times$ 5 seeds). sym = symmetric, inst = instance.}
+  \label{tab:oracle-breakdown}
+  \scriptsize
+  \setlength{\tabcolsep}{3.5pt}
+  \input{tables/en/oracle_breakdown.tex}
+\end{table}
+
+\subsection{Mechanism analysis}\label{sec:mech}
+For all \NCond{} conditions and both models, we examined the transition matrices estimated by GLC (Table~\ref{tab:mech-glc}) and the weights IRBL assigned to the untrusted samples (Table~\ref{tab:mech-irbl}).
+
+\paragraph{Estimating the transition matrix}
+While the mean diagonal of the true transition matrix is \MechLRTrueDiag{}, the value estimated from \method{naive} was \MechLRNaiveDiag{} for LR and \MechHGBNaiveDiag{} for HGB.
+Because the \texttt{gold} estimator uses a classifier trained on $\mathcal{U}$, the estimate reflects the noise in $\mathcal{U}$ rather than in the whole dataset.
+The fraction of correct labels in the \method{naive} $\mathcal{U}$ is only \MechLRNaiveUClean{} for LR and \MechHGBNaiveUClean{} for HGB, and the estimate fell even below that.
+Since $\mathcal{U} = \mathcal{I}$ consists solely of samples whose observed labels disagreed with the model's predictions, a classifier trained on $\mathcal{U}$ tends to learn a mapping opposite to the labels of $\mathcal{T}$.
+This leads to a large overestimate of the noise, and the correction based on it appears to rewrite predictions in the wrong direction.
+With \method{random}, unflagged samples mixed into $\mathcal{U}$ raise its clean rate to \MechLRRandomUClean{}, and the estimate improves to LR \MechLRRandomDiag{} and HGB \MechHGBRandomDiag{}.
+
+Even with genuine trusted data, the estimate fell below the clean rate of $\mathcal{U}$ (\MechLROracleTenUClean{}): \MechLROracleTenDiag{} for LR and \MechHGBOracleTenDiag{} for HGB.
+Increasing the trusted set to 30\% left the estimate almost unchanged (LR \MechLROracleThirtyDiag{}, HGB \MechHGBOracleThirtyDiag{}).
+The \texttt{gold} estimator assumes that the classifier trained on $\mathcal{U}$ accurately represents the posterior of the noisy labels.
+If the classifier's predicted probabilities are not concentrated on the true class, the diagonal is estimated below 1 even without noise, so the classifier's own error appears to be added on top of the noise.
+That the underestimate is larger for LR and smaller for the more expressive HGB is consistent with this interpretation.
+For HGB, however, the accuracy drop of GLC is larger than for LR even though its estimate is close to the true value (Table~\ref{tab:oracle}), which the bias of the estimate alone cannot explain.
+Other factors, such as an interaction with training after the correction, are likely involved, but we have not identified them.
+
+\paragraph{IRBL weights}
+IRBL assigned to the \method{naive} untrusted samples whose labels are actually wrong a mean weight of \MechLRWNoisy{} (LR) and \MechHGBWNoisy{} (HGB), and to those whose labels are actually correct \MechLRWClean{} (LR) and \MechHGBWClean{} (HGB).
+That is, rather than discarding all flagged samples, IRBL recovered \cl{}'s false positives (samples flagged as errors even though their labels are correct).
+This appears to be the reason for its slight advantage over \method{cl\_prune}.
+The absolute weights differ between models, but the ratio of the weights on correct and wrong labels decreased in the order \method{naive} (LR 6.1, HGB 5.6), \method{random} (3.4, 4.9), and \method{topconf} (2.6, 4.1).
+With \method{topconf}, the trusted set is biased toward easy samples, which apparently makes it harder for IRBL to tell wrong labels from ``hard but correct'' ones, consistent with the results for RQ2.
+
+For LR at instance 40\%, the mean weight on the wrong labels in the \method{naive} untrusted set was 0.80, barely lower than for correct labels and in contrast to symmetric noise (0.04--0.09).
+Instance noise consists of errors that look natural to LR, and 24\% of the labels in the \method{naive} trusted set remain wrong, so IRBL cannot tell the errors apart.
+This appears to be why \method{bq/naive/irbl} fell below \method{cl\_prune} in this condition.
+
+\begin{table}[tbp]
+  \centering
+  \caption{Mean diagonal of the transition matrix estimated by GLC (\texttt{gold}) and the fraction of correct labels in the untrusted set (mean over 3 datasets $\times$ 5 seeds). True is the unweighted average over classes of the diagonal of the true transition matrix of the whole dataset, $\frac{1}{K}\sum_{k} T_{kk}$. Under instance noise, flips concentrate on error-prone classes, so it does not match the sample-level noise rate $\rho$.}
+  \label{tab:mech-glc}
+  \scriptsize
+  \setlength{\tabcolsep}{3.5pt}
+  \input{tables/en/mechanism_glc.tex}
+\end{table}
+
+\begin{table}[tbp]
+  \centering
+  \caption{Mean weights assigned by IRBL to untrusted samples (mean over 3 datasets $\times$ 5 seeds). Noisy and Clean denote untrusted samples whose labels are actually wrong and correct, respectively.}
+  \label{tab:mech-irbl}
+  \footnotesize
+  \input{tables/en/mechanism_irbl.tex}
+\end{table}
+
+\section{Discussion}\label{sec:discussion}
+
+\paragraph{RQ1: Is pseudo-biquality learning better than pruning?}
+Only in combination with weighting methods, IRBL in particular, did it slightly outperform pruning.
+The improvement is small, 0.3--0.5~pt, and the training time is about three times longer.
+\cl{}'s standard \texttt{CleanLearning} removes the same samples and only adds per-class reweighting, yet it did not outperform \method{cl\_prune}.
+Since the shortfall was largest for LR under symmetric noise, where the noise rate does not depend on the class, variation in the estimated per-class noise rates may have introduced spurious bias between classes.
+The advantage of \method{bq/naive/irbl} therefore cannot be explained by reweighting per se; it appears to lie in recovering falsely flagged samples individually.
+
+The size of the trusted set, however, also contributes to the advantage of \method{naive}.
+$\mathcal{T}$ of \method{naive} covers the majority of the training data, whereas that of \method{random} covers about 30\%.
+Since the gain of IRBL over training on $\mathcal{T}$ alone was larger with \method{random}, IRBL's weighting itself works even with a small $\mathcal{T}$, and the benefit of \method{naive} appears to lie mainly in the size of $\mathcal{T}$.
+Combinations with transition-matrix methods should be avoided.
+
+\paragraph{RQ2: How to choose the trusted set}
+\method{topconf}, which uses the samples with the top quality scores as trusted, lowered accuracy even though it lowered the error rate of the trusted set.
+When the trusted set is biased toward ``samples that are easy for the model'', weighting methods end up weighting by ``easy or hard'', which apparently lowers the weights of hard but correct samples.
+The measured IRBL weights (Table~\ref{tab:mech-irbl}) support this.
+This is also consistent with the finding of Dataset Cartography~\cite{swayamdipta2020cartography} that confidence-based selection is biased toward easy-to-learn samples and that ambiguous samples contribute to generalization.
+When building a pseudo trusted set, following the same distribution as the untrusted set should take priority over the cleanliness of the labels.
+
+This tendency, however, depended on the dataset (Table~\ref{tab:dataset-all} in the appendix).
+For LR on covtype, which is strongly imbalanced, every split that narrows the trusted set to 30\% of the training data fell below \method{baseline} (\method{bq/random/irbl} $-$0.53 and \method{bq/random/trusted\_only} $-$1.14~pt), and positive gains were limited to \method{bq/naive/irbl} (+0.53) and \method{cl\_prune} (+0.14).
+For LR on digits, by contrast, \method{bq/topconf/irbl} (+7.01) outperformed \method{bq/random/irbl} (+5.41).
+The disadvantage of narrowing the trusted set and the effect of selection bias appear to interact with the structure and class balance of the data.
+
+\paragraph{RQ3: Using quality scores as weights or features}
+Using the scores as weights was on par with or worse than pruning and showed no benefit.
+Using them as a feature worked as well as pruning for HGB but degraded LR substantially.
+We see three possible factors.
+First, when $s$ is concatenated additively to a multiclass logistic regression, the logit of class $c$ becomes $w_c^\top x + w_{c,s} s + b_c$, so $s$ can only shift the logits independently of $x$.
+It therefore cannot represent ``the decision boundary when the label is reliable''.
+This is a limitation specific to additive concatenation without interaction terms (such as $s x$); a linear model can represent it if the interactions are added explicitly.
+Second, $s$ is spread widely below 1 during training, whereas $s=1$ is given uniformly at inference.
+If classes with a high average $s$ during training receive a positive $w_{c,s}$, a constant corresponding to $w_{c,s}(1 - \bar{s})$ is added to each class's intercept at inference, which may bias predictions toward those classes.
+That LR degraded strongly even under symmetric noise ($-$5.31~pt at 20\% and $-$10.40~pt at 40\%) is consistent with this intercept shift.
+Third, for HGB, splits on $s$ ($s > \theta$) route inputs at inference, where $s=1$, into subtrees built from high-confidence training samples.
+This appears to act as implicit pruning inside the trees rather than learning a decision boundary conditioned on confidence.
+We have not verified these explanations directly.
+
+\paragraph{Practical implications}
+If no human input is used at all, pruning with \cl{} is the first choice in terms of the balance between ease and effect.
+In our experiments, the per-class reweighting of \texttt{CleanLearning} brought no additional gain.
+If computation time allows, combining the \method{naive} split with IRBL can be expected to add a small gain.
+On the other hand, if 30\% of the training data can be verified by hand, IRBL outperforms the best automatic method by about 4--5~pt on average, with a high win rate (LR \PLROracleThirtyVsNaiveIrblWin\%, HGB \PHGBOracleThirtyVsNaiveIrblWin\%).
+With 10\% verification, it wins on average but in fewer than half of the conditions, although under heavy systematic noise (pair 40\%) it outperformed the automatic methods by 13--14~pt.
+When the nature of the noise is unknown, it is worth verifying a small random sample to learn the noise rate and its tendencies.
+
+\section{Limitations}\label{sec:limit}
+\begin{itemize}
+  \item All noise is synthetic. In particular, the instance noise was generated with LR, so it is biased toward directions that are hard for LR to detect, and the conditions are not symmetric between LR and HGB.
+  \item We use only three small-to-medium tabular datasets and do not cover images, text, or deep learning models. The effect of narrowing the trusted set differs between datasets (covtype vs.\ digits), which limits generalization from three datasets.
+  \item Hyperparameters ($\tau$, the detection settings of \cl{}, and the settings of each algorithm) were not tuned, and only a single value, $\tau = 0.3$, was evaluated.
+  \item The HGB learning rate was originally chosen by referring to the test data. We confirmed post hoc that cross-validation within the training data leads to the same choice, but the selection process itself depended on the test data.
+  \item We confirmed that the underestimate of the \texttt{gold} estimator and minority classes contribute to the weakness of the transition-matrix methods with genuine trusted data, but we have not identified what causes the degradation for HGB.
+  \item The training time of \texttt{CleanLearning} includes re-running the label-issue detection internally, so it is not comparable with the other methods and is not reported.
+  \item The confidence intervals do not account for correlations between conditions.
+\end{itemize}
+
+\section{Conclusion}
+We evaluated pseudo-biquality learning, which builds trusted/untrusted sets automatically from \cl{}'s output and feeds them to \bq{}, on \NCond{} conditions $\times$ 2 models.
+The combination with IRBL slightly outperformed pruning and \texttt{CleanLearning}, but part of this benefit came from the size of the trusted set.
+Combinations with transition-matrix methods broke down badly, and we confirmed by measurement that the cause is the underestimated transition matrix resulting from mislabeled samples concentrating in the untrusted set.
+For choosing the trusted set, low distributional bias mattered more than clean labels.
+On the other hand, the gap to a human-verified trusted set of the same size was large, so the cost of removing humans entirely is not small.
+Future work includes validation on real-world noise, a systematic exploration of the trusted-set ratio and selection, and semi-automatic schemes that combine a small amount of human verification with \cl{}.
+
+\printbibliography
+
+\appendix
+\clearpage
+\section{Detailed Results}
+
+\begin{table}[htbp]
+  \centering
+  \caption{$\Delta$ by noise kind and rate (pt, all methods). The first row is the accuracy of \method{baseline} (\%).}
+  \label{tab:noise-all}
+  \scriptsize
+  \setlength{\tabcolsep}{4pt}
+  \input{tables/en/by_noise_all.tex}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{$\Delta$ by dataset (pt, all methods, mean over 3 noise kinds $\times$ 2 rates $\times$ 5 seeds). The first row is the accuracy of \method{baseline} (\%).}
+  \label{tab:dataset-all}
+  \scriptsize
+  \input{tables/en/by_dataset_all.tex}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Check of the HGB learning rate: accuracy (\%) of 5-fold cross-validation within the training split of each seed (true labels, no test data). Mean (min--max) over 5 seeds.}
+  \label{tab:hgb-lr}
+  \footnotesize
+  \input{tables/en/hgb_lr.tex}
+\end{table}
+
+\clearpage
+\section{Reproduction}
+The code is in \texttt{label-noise-experiment/}.
+The following commands run all experiments in this paper and regenerate the tables, the figure, and the numbers in the text.
+Figure~\ref{fig:delta}, all tables, and the macros for the numbers in the text (\texttt{latex/numbers.tex}) are generated by \texttt{export\_latex}.
+The loop (for both models) and \texttt{hgb\_lr\_check} can also be run together with \texttt{sh rerun\_all.sh}.
+\begin{verbatim}
+for m in lr hgb; do
+  uv run python -m label_noise_experiment.run --model $m
+  uv run python -m label_noise_experiment.oracle_check --model $m --oracle-frac 0.1
+  uv run python -m label_noise_experiment.oracle_check --model $m --oracle-frac 0.3
+  uv run python -m label_noise_experiment.mechanism --model $m
+done
+uv run python -m label_noise_experiment.hgb_lr_check
+uv run python -m label_noise_experiment.export_latex
+wsl sh latex/build.sh    # build the PDFs (Docker image texlive/texlive)
+\end{verbatim}
+
+\end{document}

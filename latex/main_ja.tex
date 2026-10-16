@@ -1,0 +1,472 @@
+\documentclass[a4paper,10pt]{ltjsarticle}
+
+\usepackage[margin=24mm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage[backend=biber,style=numeric-comp,sorting=none,maxnames=4,giveninits=true]{biblatex}
+\usepackage[hidelinks]{hyperref}
+
+\addbibresource{references.bib}
+\captionsetup{font=small,labelfont=bf}
+\setlist{itemsep=0.2em,topsep=0.4em}
+
+\input{numbers.tex}
+
+\newcommand{\method}[1]{\texttt{#1}}
+\newcommand{\cl}{\textsf{cleanlab}}
+\newcommand{\bq}{\textsf{biquality-learn}}
+
+\title{Confident Learning による疑似バイクオリティ学習：\\人手を介さないラベルノイズ対策の実証的検討}
+\author{codemajin}
+\date{2026年10月}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+バイクオリティ学習は、ラベルが正しいと保証された少量の trusted データと、ノイズを含みうる大量の untrusted データの両方を用いてラベルノイズに対処する枠組みである。
+しかし trusted データの用意には通常人手による確認が必要となる。
+本研究では、Confident Learning の実装である \cl{} が出力するラベル誤り判定と品質スコアから trusted / untrusted の分割を自動で作り（疑似バイクオリティ化）、\bq{} の各アルゴリズムに入力する方法を、
+そのまま学習する方法、\cl{} による除去（\cl{} 標準の CleanLearning を含む）、品質スコアを重み・特徴量として使う方法と比較した。
+3 つの表形式データセット、3 種類の合成ノイズ、2 段階のノイズ率、5 シードの計 \NCond{} 条件で、ロジスティック回帰と勾配ブースティングの 2 種類のベースモデルを用いて評価した。
+その結果、疑似 trusted と IRBL の組み合わせは人手を使わない手法の中で平均精度が最も高かった（ベースライン比 LR で \DLRNaiveIRBL{}~pt、HGB で \DHGBNaiveIRBL{}~pt）。
+ただし単純な除去との差は 0.3--0.5~pt にとどまり、学習時間は約 3 倍であった。
+クラスごとの再重み付けを含む CleanLearning は単純な除去を上回らなかった。
+一方、遷移行列を推定する GLC・Plugin・IRLNL は疑似 trusted と組み合わせると精度が最大 37~pt 低下した。
+\cl{} の判定に基づく分割では untrusted に誤ラベルが集まり、遷移行列の対角成分が大きく過小推定されることを確認した。
+また、品質スコアの高いサンプルを trusted に選ぶと、trusted の誤ラベル率は下がるにもかかわらず精度が低下した。
+対照として学習データの 30\% を人手で確認した場合を模擬すると、IRBL は自動の最良手法を平均 LR \PLROracleThirtyVsNaiveIrbl{}、HGB \PHGBOracleThirtyVsNaiveIrbl{}~pt 上回った。
+\end{abstract}
+
+\section{はじめに}
+
+教師あり学習のラベルには、アノテーションの誤りや曖昧さによる誤り（ラベルノイズ）が含まれることが多い~\cite{frenay2014survey,song2023survey}。
+ラベルノイズへの対処法は大きく 2 つに分けられる。
+1 つは誤ったラベルを検出して除去・修正する方法であり、代表例が Confident Learning~\cite{northcutt2021confident} とその実装 \cl{} である。
+もう 1 つはノイズを前提に学習手続きを補正する方法であり、その中でもバイクオリティ学習~\cite{nodet2023framework}は、正しさが保証された少量の trusted データを手がかりに、大量の untrusted データの重み付けや損失補正を行う。
+\bq{}~\cite{nodet2023bqlearn} はこの枠組みのアルゴリズムを scikit-learn~\cite{pedregosa2011sklearn} 互換で実装したライブラリである。
+
+バイクオリティ学習の弱点は、trusted データの作成に人手による確認が必要な点にある。
+そこで自然に浮かぶのが、\cl{} が「誤りなし」と判定したサンプルを trusted とみなせば人手を省けるのではないか、という発想である。
+ただし \cl{} の判定にはモデルの予測が使われるため、判定の結果できる trusted 集合は「モデルが自信を持って当てられるサンプル」に偏る。
+また、バイクオリティ学習の多くの手法は、trusted と untrusted が同じ分布から抽出されていることを暗に仮定している。
+この組み合わせが実際に有効かどうかは自明でない。
+
+本研究の目的は、人手を一切介さない条件の下で次の問いに答えることである。
+\begin{description}[leftmargin=2.5em,style=nextline]
+  \item[RQ1] \cl{} の出力で作った疑似 trusted / untrusted を \bq{} に入力すると、\cl{} による除去より精度が上がるか。
+  \item[RQ2] 疑似 trusted の選び方（判定のみ・品質スコア上位・無作為）は結果にどう影響するか。
+  \item[RQ3] \cl{} の品質スコアを重みや特徴量として使う方法は有効か。
+  \item[RQ4] 上記の結果はどのような仕組みで生じるか。
+\end{description}
+
+本稿の貢献は以下のとおりである。
+\begin{itemize}
+  \item 疑似バイクオリティ化の 3 方式と \bq{} の 6 アルゴリズム（および trusted のみでの学習）を組み合わせ、除去・CleanLearning・重み付け・特徴量化と並べて、計 \NCond{} 条件 $\times$ 2 モデルで比較した。
+  \item 重み付け系（IRBL）は除去と同等以上である一方、遷移行列系は大きく崩れることを示し、その原因を遷移行列の推定値、untrusted の誤ラベル率、IRBL の重みの実測から説明した。
+  \item 本物のクリーンな trusted を 2 種類の大きさ（10\%・30\%）で与える対照実験により、疑似 trusted に起因する劣化、trusted の大きさの影響、手法自体の弱さを切り分けた。
+\end{itemize}
+
+\section{関連研究}
+
+\paragraph{ラベルノイズ学習}
+ラベルノイズ下の分類は古くから研究されており、ノイズの種類はラベルの反転確率がクラスのみに依存するクラス条件付きノイズと、入力にも依存するインスタンス依存ノイズに大別される~\cite{frenay2014survey,song2023survey}。
+
+\paragraph{誤ラベルの検出}
+Confident Learning~\cite{northcutt2021confident} は、交差検証で得たサンプル外の予測確率と与えられたラベルから、ノイズ付きラベルと真のラベルの同時分布（confident joint）を推定し、ラベル誤りの候補を列挙する。
+\cl{} はこれに加えて、与えられたラベルの予測確率（self-confidence）などのラベル品質スコアと、誤り候補を除いたうえでクラスごとのノイズ率に応じた重みで再学習する \texttt{CleanLearning} を提供する。
+George ら~\cite{george2024probing} は、Confident Learning を含む多数の誤ラベル検出手法を「学習済みモデルを探るプローブ」として統一的に整理し、完全に無作為なノイズと無作為でないノイズの両方で比較している。
+本研究はこれらの検出手法の出力を、検出精度そのものではなく、後段のバイクオリティ学習の入力としての有用性という観点から評価する。
+
+\paragraph{確信度による選別の偏り}
+Swayamdipta ら~\cite{swayamdipta2020cartography} は、学習中のモデルの確信度とその変動からサンプルを「学習しやすい」「曖昧」「学習しにくい」に分け、誤ラベルが学習しにくい領域に集まる一方、曖昧なサンプルが汎化に寄与することを示した。
+確信度の高いサンプルだけを選ぶと学習しやすいサンプルに偏るという指摘は、本研究の trusted の選び方（RQ2）と直接関係する。
+
+\paragraph{バイクオリティ学習}
+バイクオリティ学習~\cite{nodet2023framework} では、学習データが trusted 集合 $\mathcal{T}$ と untrusted 集合 $\mathcal{U}$ からなる。
+\bq{} が実装する手法は大きく 2 系統に分けられる。
+1 つは $\mathcal{U}$ の各サンプルに重みを付けて $\mathcal{T}$ の分布に近づける重み付け系であり、IRBL~\cite{nodet2021irbl}、確率的分類器で密度比を推定する K-PDR~\cite{bickel2007discriminative,nodet2023framework}、カーネル平均マッチングを用いる K-KMM~\cite{huang2006kmm,nodet2023framework} がある。
+もう 1 つはラベルの遷移行列 $T_{ij} = P(\tilde{y}=j \mid y=i)$ を推定して補正する遷移行列系であり、損失を補正する GLC~\cite{hendrycks2018glc}、予測時にのみ補正する Plugin~\cite{zhang2021plugin}、遷移行列から重要度重みを導く IRLNL~\cite{liu2016irlnl} がある。
+
+遷移行列系の 3 手法のうち、元の Plugin と IRLNL はアンカー点などを用いてノイズ付きデータだけから $T$ を推定する手法である。
+\bq{} ではこれらをバイクオリティの設定に合わせ、GLC と同じ \texttt{gold} 推定で $T$ を求める。
+すなわち、$\mathcal{U}$ で学習した確率的分類器を $\mathcal{T}$ 上で評価し、$\mathcal{T}$ のラベル $i$ ごとに、予測されたノイズ付きラベルの確率を平均して $T$ の第 $i$ 行とする。
+IRLNL はこの $T$ から求めたクリーンなクラス事後確率とノイズ付きクラス事後確率の比を $\mathcal{U}$ の重みとし、$\mathcal{T}$ の重みは 1 とする。
+したがって 3 手法はいずれも「$\mathcal{U}$ がデータ全体のノイズ分布を代表している」ことを前提としており、この前提が崩れると 3 手法がそろって崩れる。
+
+\section{手法}
+
+\subsection{問題設定}
+学習データ $\mathcal{D} = \{(x_i, \tilde{y}_i)\}_{i=1}^{n}$ のラベル $\tilde{y}_i \in \{1,\dots,K\}$ には誤りが含まれ、真のラベル $y_i$ は観測できない。
+人手による確認は行わず、$\mathcal{D}$ だけから分類器を学習する。
+
+\subsection{\cl{} の出力}
+ベースモデルを 5 分割の層化交差検証で学習し、サンプル外予測確率 $\hat{p}_i \in \Delta^{K-1}$ を得る。
+これを \cl{} に与え、ラベル誤りと判定されたサンプルの集合 $\mathcal{I} \subset \{1,\dots,n\}$（\texttt{find\_label\_issues}、既定の設定）と、ラベル品質スコア $s_i$ を得る。
+$s_i$ には self-confidence $s_i = \hat{p}_{i,\tilde{y}_i} \in [0,1]$ と、normalized margin $s_i = (\hat{p}_{i,\tilde{y}_i} - \max_{k \neq \tilde{y}_i} \hat{p}_{i,k} + 1)/2 \in [0,1]$ の 2 種類を用いた。
+後者は \cl{} の定義に従い、マージンを $[0,1]$ に写したものである。
+\method{cl\_weight/*} 以外で $s_i$ を使う箇所（\method{topconf} と \method{cl\_feature}）では self-confidence を用いた。
+
+\subsection{比較する手法}
+すべての手法は $\mathcal{D}$ のみから学習する。
+番号は手法の群を表し、表~\ref{tab:overall} の群と対応する。
+\begin{enumerate}[label=(\arabic*)]
+  \item \method{baseline}：$\mathcal{D}$ でそのまま学習する。
+  \item \method{cl\_prune}：$\mathcal{D} \setminus \mathcal{I}$ で一様な重みで学習する。\\
+        \method{cl\_cleanlearning}：\cl{} の \texttt{CleanLearning} を用いる。上と同じ $\hat{p}_i$ を与えるため除去されるサンプルは \method{cl\_prune} と同一であり、残ったサンプルに、confident joint から推定したノイズ行列の対角成分の逆数 $1/\max(\hat{P}(\tilde{y}=k \mid y=k), 10^{-3})$ をクラス $k$ の重みとして与えて学習する。両者の差はクラスごとの再重み付けの有無のみである。
+  \item \method{bq/<split>/<algo>}：疑似 trusted / untrusted の分割（\ref{sec:split} 節）を作り、\bq{} のアルゴリズムで学習する。アルゴリズムは IRBL、K-PDR、K-KMM、GLC、Plugin、IRLNL と、$\mathcal{T}$ のみで一様な重みで学習する \method{trusted\_only} である。遷移行列系はすべて \texttt{gold} 推定を用いる。なお \method{naive} 分割では $\mathcal{T} = \mathcal{D} \setminus \mathcal{I}$ となるため \method{bq/naive/trusted\_only} は \method{cl\_prune} と同一であり、表では省略する。
+  \item \method{cl\_weight/*}：$s_i$ をサンプル重みとして $\mathcal{D}$ で学習する。\\
+        \method{cl\_feature}：特徴量 $[x_i, s_i]$ で学習し、推論時は $s=1$ を入力する。$x_i$ は標準化済みで、$s_i$（self-confidence）は標準化せず $[0,1]$ のまま結合する。推論時には $s$ が得られないため、値域の上限（最も信頼できるラベル）に条件付けて代用する。
+\end{enumerate}
+参照値として、真のラベルで学習した \method{oracle\_clean} と、学習データから一様無作為に（層化せずに）選んだ 10\% または 30\% のサンプルのラベルを真のラベルに戻して trusted とし、残りすべてを untrusted として IRBL で学習した \method{oracle\_trusted10/irbl}・\method{oracle\_trusted30/irbl} を示す。
+後者は「少量を人手で確認する」という \bq{} 本来の使い方に相当する。
+10\% は現実的な確認作業量の目安として、30\% は疑似分割の $\tau = 0.3$ と trusted の大きさをそろえるために選んだ。
+両者は同じ一様乱数から作るため、10\% の trusted は 30\% の trusted に含まれる。
+
+\subsection{疑似 trusted / untrusted の分割}\label{sec:split}
+クラス $c$ のサンプル集合を $\mathcal{D}_c = \{i : \tilde{y}_i = c\}$、そのうち誤り判定を受けなかったものを $\mathcal{C}_c = \mathcal{D}_c \setminus \mathcal{I}$ とする。
+\begin{itemize}
+  \item \method{naive}：$\mathcal{T} = \{1,\dots,n\} \setminus \mathcal{I}$、$\mathcal{U} = \mathcal{I}$。
+  \item \method{topconf}：各クラスについて $\mathcal{C}_c$ のうち $s_i$（self-confidence）が大きい順に $k_c$ 件を $\mathcal{T}$ とし、残りすべてを $\mathcal{U}$ とする。
+  \item \method{random}：各クラスについて $\mathcal{C}_c$ から無作為に $k_c$ 件を $\mathcal{T}$ とし、残りすべてを $\mathcal{U}$ とする。
+\end{itemize}
+ここで $k_c = \min(\max(1, \mathrm{round}(\tau |\mathcal{D}_c|)), |\mathcal{C}_c|)$、$\tau = 0.3$ である。
+本実験では全条件で $|\mathcal{C}_c| \geq \tau |\mathcal{D}_c|$ がほぼ成り立ち、\method{topconf} と \method{random} の $\mathcal{T}$ は学習データの約 30\% となる。
+一方 \method{naive} の $\mathcal{T}$ は条件により学習データの \NaiveTSizeMinLR--\NaiveTSizeMaxLR\%（LR）、\NaiveTSizeMinHGB--\NaiveTSizeMaxHGB\%（HGB）を占める。
+\method{topconf} と \method{random} はクラス比を保ち、$\mathcal{U}$ を誤り判定サンプルだけに偏らせないための設計である。
+\method{topconf} は trusted の誤ラベル率を下げる代わりに選択バイアスを強め、\method{random} はその逆となる。
+ただし両者とも $\mathcal{I}$ はすべて $\mathcal{U}$ に入るため、$\mathcal{U}$ の誤ラベル率はデータ全体のノイズ率 $\rho$ より高くなる（\ref{sec:diag} 節）。
+
+\section{実験設定}
+
+\paragraph{データセット}
+次の 3 つを用いた。
+digits（1,797 件、64 特徴、10 クラス）。
+\texttt{make\_classification} による合成データ synth（\texttt{n\_samples=8000, n\_features=20, n\_informative=10, n\_redundant=4, n\_classes=6, n\_clusters\_per\_class=1, class\_sep=1.0, random\_state=0}）。
+covtype~\cite{blackard1999covtype} から層化抽出した 12,000 件（54 特徴うち 44 個は二値、7 クラス、クラス比の偏りが大きい）。
+各データをシードごとに層化して学習 70\%・テスト 30\% に分けた。
+標準化は学習データ 70\% 全体で交差検証の前に一度だけ当てはめ、covtype の二値特徴を含むすべての特徴に適用した。
+ノイズは学習データにのみ加え、テストラベルは常に真のラベルとした。
+
+\paragraph{ノイズ}
+ノイズ率 $\rho \in \{0.2, 0.4\}$ に対し、ちょうど $\mathrm{round}(\rho n)$ 件のラベルを別のクラスへ書き換えた。
+\begin{itemize}
+  \item symmetric：無作為に選んだサンプルを、一様無作為な別クラスへ書き換える。
+  \item pair：不動点のない置換 $\pi$ を 1 つ無作為に定め、無作為に選んだサンプルを $\pi(y)$ へ書き換える。
+  \item instance：学習データ 70\% の真のラベルで学習したロジスティック回帰 $f^*$（\texttt{max\_iter=2000}）の学習データ上での予測確率を用い、$1 - f^*(x)_y + 10^{-3}$ に比例する確率で重み付き非復元抽出によりサンプルを選び、$\arg\max_{k \neq y} f^*(x)_k$ へ書き換える。現実の誤アノテーションのように、紛らわしいサンプルほど、紛らわしいクラスへ誤る。
+\end{itemize}
+instance ノイズの生成に LR を用いたため、ノイズは LR の決定境界の近くに集中する。
+このノイズはベースモデルが LR の場合に検出しにくく、HGB とは条件が対称でない点に注意が必要である（\ref{sec:limit} 節）。
+
+\paragraph{モデルと実装}
+ベースモデルはロジスティック回帰（LR、\texttt{max\_iter=2000}）と HistGradientBoosting（HGB、\texttt{max\_iter=200}、学習率 0.05）である。
+HGB の学習率は、当初、既定の 0.1 では covtype で学習が不安定であったため 0.05 に変更した。
+この判断はシード 0 の分割のテストデータ上での、真のラベルによる精度（0.1 で 0.61、0.05 で 0.79）を見て行ったものであり、テストデータを参照した選択であった。
+そこで事後的に、各シードの学習データ内部での 5 分割交差検証（真のラベル、テストデータは不使用）で同じ比較を行った（付録の表~\ref{tab:hgb-lr}）。
+covtype では学習率 0.1 の平均精度が \CovLRHigh\%（最小 72.1\%）、0.05 が \CovLRLow\% であり、テストデータを使わなくても同じ選択になることを確認した。
+digits と synth では両者の差は 0.4~pt 以下であった。
+なお、この選択はノイズのない状態でのベースモデルの安定性の確認であり、ノイズ対策の手法ごとの調整ではない。
+
+IRBL の 2 つの確率的分類器と、\texttt{gold} 推定で $\mathcal{U}$ に当てはめる分類器には、ベースモデル（LR または学習率 0.05 の HGB）をそのまま用いた。
+K-PDR の密度比推定には、ベースモデルによらずロジスティック回帰を用いた。
+K-KMM にはバッチサイズ 1,000 を用いた。
+これら以外のハイパーパラメータは既定値のままで、調整は行っていない。
+実装は Python 3.11、\cl{} 2.9.0、\bq{} 0.1.0、scikit-learn 1.5.2 である。
+\bq{} 0.1.0 は scikit-learn 1.6 以降では動作しないため、scikit-learn を 1.5 系に固定した。
+
+\paragraph{評価}
+データセット 3 $\times$ ノイズ 3 $\times$ ノイズ率 2 $\times$ シード 5 の \NCond{} 条件それぞれで、テスト精度と、同じ条件の \method{baseline} との差 $\Delta$（ポイント）を求めた。
+表では $\Delta$ の \NCond{} 条件平均と、その 95\% 信頼区間の半幅（$1.96 \times$ 標準誤差）、$\Delta > 0$ となった条件の割合（勝率）を示す。
+条件は互いに独立でないため、信頼区間は目安として扱う。
+
+\section{結果}
+
+\subsection{全体の比較}
+
+表~\ref{tab:overall} と図~\ref{fig:delta} に全条件の平均を示す。
+ベースラインの平均精度は LR で \AccLRBaseline\%、HGB で \AccHGBBaseline\% であった。
+人手を使わない手法の中で $\Delta$ が最も大きかったのは両モデルとも \method{bq/naive/irbl} であり（LR \DLRNaiveIRBL{}、HGB \DHGBNaiveIRBL{}）、\method{cl\_prune}（LR \DLRPrune{}、HGB \DHGBPrune{}）が続いた。
+\method{cl\_cleanlearning} は LR \DLRCleanLearning{}、HGB \DHGBCleanLearning{} であり、\method{cl\_prune} を上回らなかった。
+一方、遷移行列系は \method{naive} 分割で LR \DLRNaiveGLC{}～\DLRNaivePlugin{}、HGB \DHGBNaiveIRLNL{}～\DHGBNaivePlugin{} と大きく悪化した。
+参照値の \method{oracle\_trusted10/irbl} は LR \DLROracleTen{}、HGB \DHGBOracleTen{}、\method{oracle\_trusted30/irbl} は LR \DLROracleThirty{}、HGB \DHGBOracleThirty{} であった。
+
+\begin{table}[tbp]
+  \centering
+  \caption{全 \NCond{} 条件の平均。精度はテスト精度（\%）、$\Delta$ は \method{baseline} との差（pt）と 95\% 信頼区間の半幅、勝率は $\Delta>0$ の条件の割合（\%）。太字は参照を除き $\Delta$ が最大の手法。\method{bq/naive/trusted\_only} は \method{cl\_prune} と同一のため省略した。}
+  \label{tab:overall}
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \input{tables/ja/overall.tex}
+\end{table}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/delta_vs_baseline.pdf}
+  \caption{\method{baseline} に対する精度差の平均と 95\% 信頼区間（左：LR、右：HGB）。}
+  \label{fig:delta}
+\end{figure}
+
+\subsection{手法間の対比較}
+表~\ref{tab:paired} に、同一条件どうしの精度差を示す。
+\method{bq/naive/irbl} は \method{cl\_prune} を平均で LR \PLRNaiveIrblVsPrune{}、HGB \PHGBNaiveIrblVsPrune{}~pt 上回り、勝率はそれぞれ \PLRNaiveIrblVsPruneWin\%、\PHGBNaiveIrblVsPruneWin\% であった。
+差は小さいが、信頼区間は両モデルとも 0 を含まない。
+学習時間は \method{cl\_prune} の LR で \TimeLRRatio{} 倍、HGB で \TimeHGBRatio{} 倍であった。
+
+\method{cl\_cleanlearning} は \method{cl\_prune} に対して LR で \PLRCLVsPrune{}~pt（勝率 \PLRCLVsPruneWin\%）、HGB で \PHGBCLVsPrune{}~pt（勝率 \PHGBCLVsPruneWin\%）であった。
+クラスごとの再重み付けは、LR では精度を下げ、HGB ではほぼ影響しなかった。
+このため \method{bq/naive/irbl} と \method{cl\_cleanlearning} の差（LR \PLRNaiveIrblVsCL{}、HGB \PHGBNaiveIrblVsCL{}~pt）は、\method{cl\_prune} との差より大きい。
+
+分割方式の間では、\method{random} が \method{topconf} を一貫して上回った（IRBL で LR \PLRRandomIrblVsTopIrbl{}、HGB \PHGBRandomIrblVsTopIrbl{}~pt、\method{trusted\_only} で LR \PLRRandomTVsTopT{}、HGB \PHGBRandomTVsTopT{}~pt）。
+\method{naive} は \method{random} をわずかに上回った（IRBL で LR \PLRNaiveIrblVsRandomIrbl{}、HGB \PHGBNaiveIrblVsRandomIrbl{}~pt）。
+各分割で $\mathcal{T}$ のみの学習に対する IRBL の上積みを見ると、\method{random} では LR \PLRRandomIrblVsRandomT{}、HGB \PHGBRandomIrblVsRandomT{}~pt であり、\method{naive} での上積み（\method{cl\_prune} に対する差）より大きい。
+すなわち \method{naive} の優位は IRBL の重み付けの効果というより、$\mathcal{T}$ が大きいことによる部分が大きい（\ref{sec:discussion} 節）。
+
+品質スコアを重みにする \method{cl\_weight/self\_confidence} は、LR では \method{cl\_prune} と同程度（\PLRWeightVsPrune）、HGB では劣った（\PHGBWeightVsPrune）。
+特徴量にする \method{cl\_feature} は、HGB では \method{cl\_prune} と同程度（\PHGBFeatureVsPrune）であったが、LR では大きく劣った（\PLRFeatureVsPrune）。
+
+\begin{table}[tbp]
+  \centering
+  \caption{同一条件における手法 A と手法 B の精度差（pt）。勝率は A が B を上回った条件の割合（\%）。差は丸める前の精度から計算しているため、表~\ref{tab:overall} の丸めた値どうしの差と 0.01~pt ずれることがある。}
+  \label{tab:paired}
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \input{tables/ja/paired.tex}
+\end{table}
+
+\subsection{ノイズの種類による違い}
+表~\ref{tab:noise} にノイズの種類と率ごとの $\Delta$ を示す。
+自動の手法による改善が最も大きかったのは pair ノイズであり、ノイズ率 40\% で \method{bq/naive/irbl} は LR +6.91、HGB +7.48~pt であった。
+ただし同じ条件で \method{oracle\_trusted10/irbl} は LR +19.94、HGB +21.40~pt、\method{oracle\_trusted30/irbl} は LR +21.95、HGB +24.22~pt であり、人手で確認したサンプルを trusted とすることの効果が非常に大きかった。
+instance ノイズでは自動の手法の改善は小さく、LR ではどの手法も 1~pt 以下であった。
+LR の instance 40\% では \method{bq/naive/irbl}（$-$0.18）が \method{cl\_prune}（+0.76）を下回った（理由は \ref{sec:mech} 節）。
+\method{cl\_cleanlearning} の \method{cl\_prune} に対する劣後は LR の symmetric ノイズで最も大きかった（40\% で +0.68 対 +2.21）。
+
+全体平均では \method{oracle\_trusted10/irbl} が \method{bq/naive/irbl} を上回るものの、条件ごとの勝率は LR \PLROracleTenVsNaiveIrblWin\%、HGB \PHGBOracleTenVsNaiveIrblWin\% と半数に満たず、平均の差の大部分は pair ノイズ 40\% によるものである。
+一方、trusted の大きさを 30\% にそろえた \method{oracle\_trusted30/irbl} は、\method{bq/naive/irbl} を LR \PLROracleThirtyVsNaiveIrbl{}~pt（勝率 \PLROracleThirtyVsNaiveIrblWin\%）、HGB \PHGBOracleThirtyVsNaiveIrbl{}~pt（勝率 \PHGBOracleThirtyVsNaiveIrblWin\%）上回った。
+10\% から 30\% への増加は、ほぼすべての条件で精度を上げた（勝率 LR \PLROracleThirtyVsOracleTenWin\%、HGB \PHGBOracleThirtyVsOracleTenWin\%）。
+
+\begin{table}[tbp]
+  \centering
+  \caption{ノイズの種類と率ごとの $\Delta$（pt、3 データセット $\times$ 5 シードの平均）。主要な手法のみ。先頭行は \method{baseline} の精度（\%）。全手法は付録の表~\ref{tab:noise-all}。}
+  \label{tab:noise}
+  \footnotesize
+  \input{tables/ja/by_noise_key.tex}
+\end{table}
+
+\subsection{\cl{} の検出性能と分割の質}\label{sec:diag}
+表~\ref{tab:diag} に \cl{} の検出性能と、各分割における誤ラベル率を示す。
+symmetric と pair 20\% では再現率が 84--91\% と高いのに対し、instance ノイズでは \InstRecallMin--\InstRecallMax\%（データセット・モデル別の平均の範囲）にとどまった。
+\method{naive} の untrusted（=誤り判定サンプル）の誤ラベル率は \NaiveUntrustedMin--\NaiveUntrustedMax\% であり、\method{naive} の trusted にも条件によって 2--26\% の誤ラベルが残った。
+\method{random} と \method{topconf} の untrusted の誤ラベル率も、$\mathcal{I}$ がすべて untrusted に入るため $\rho$ より高い（$\rho = 20\%$ で 23--28\%、$\rho = 40\%$ で 45--54\%）。
+\method{topconf} の trusted は \method{random} の trusted より誤ラベル率が低い（たとえば HGB の symmetric 20\% で 1.2\% 対 3.1\%）。
+それにもかかわらず、前節のとおり精度では \method{random} が上回った。
+
+\begin{table}[tbp]
+  \centering
+  \caption{\cl{} の検出性能と疑似分割の誤ラベル率（\%、3 データセット $\times$ 5 シードの平均）。指摘率は誤り判定を受けたサンプルの割合。T は trusted、U は untrusted。\method{naive} では $\mathcal{U} = \mathcal{I}$ のため naive U の誤ラベル率は適合率に等しく、naive T の大きさは 1 $-$ 指摘率である。}
+  \label{tab:diag}
+  \footnotesize
+  \setlength{\tabcolsep}{3.5pt}
+  \input{tables/ja/diagnostics.tex}
+\end{table}
+
+\subsection{対照実験：本物の trusted を与えた場合}\label{sec:oracle}
+疑似 trusted に起因する劣化と手法自体の性能とを切り分けるため、一様無作為に選んだ 10\% または 30\% のサンプルのラベルを真のラベルに戻して trusted とし、同じアルゴリズムを評価した（表~\ref{tab:oracle}）。
+重み付け系の IRBL と K-PDR は oracle で最もよく、naive・random でも正の改善を保った。
+\method{trusted\_only} は oracle 10\% では HGB で \OHGBTRUSTEDONLYTen{} にとどまったが、30\% では LR \OLRTRUSTEDONLYThirty{}、HGB \OHGBTRUSTEDONLYThirty{} となり、trusted の大きさが結果を大きく左右した。
+
+遷移行列系は oracle でも多くの場合 \method{baseline} を下回った（GLC は 10\% で LR \OLRGLCTen{}、HGB \OHGBGLCTen{}、30\% で LR \OLRGLCThirty{}、HGB \OHGBGLCThirty{}）。
+例外は HGB の IRLNL で、30\% では \OHGBIRLNLThirty{} と改善した。
+ただし \method{naive} での劣化（$-$24～$-$37~pt）は oracle よりはるかに大きかった。
+すなわち、遷移行列系は本実験の設定ではそもそも強くなく、疑似 trusted がそれをさらに大きく悪化させた。
+
+遷移行列系が oracle でも弱い理由として、当初は trusted の少ない少数クラス（covtype）での推定の不安定さを想定した。
+データセット別の内訳（表~\ref{tab:oracle-breakdown}）を見ると、Plugin の劣化は covtype に集中しており（LR で $-$20~pt 前後）、この仮説と整合する。
+一方、GLC と IRLNL はクラス比の釣り合った synth でも LR で劣化し（GLC は最大 $-$4.3~pt、IRLNL は symmetric・instance で $-$18～$-$24~pt）、少数クラスだけでは説明できない。
+GLC の対角成分の推定は trusted を 10\% から 30\% に増やしてもほとんど変わらなかった（\ref{sec:mech} 節）ことから、件数よりも推定の偏りが主な要因と考えられる。
+
+\begin{table}[tbp]
+  \centering
+  \caption{trusted の作り方による $\Delta$（pt）の比較。naive・random は \cl{} による疑似 trusted、oracle10・oracle30 は一様無作為に選んだ 10\%・30\% を真のラベルに戻した本物の trusted。$^\dagger$ \method{bq/naive/trusted\_only} は \method{cl\_prune} と同一のため、その値を示した。}
+  \label{tab:oracle}
+  \footnotesize
+  \input{tables/ja/oracle.tex}
+\end{table}
+
+\begin{table}[tbp]
+  \centering
+  \caption{本物の trusted を与えた場合の $\Delta$（pt）のデータセット・ノイズ別の内訳（2 ノイズ率 $\times$ 5 シードの平均）。sym = symmetric、inst = instance。}
+  \label{tab:oracle-breakdown}
+  \scriptsize
+  \setlength{\tabcolsep}{3.5pt}
+  \input{tables/ja/oracle_breakdown.tex}
+\end{table}
+
+\subsection{メカニズムの分析}\label{sec:mech}
+全 \NCond{} 条件と両モデルについて、GLC が推定した遷移行列（表~\ref{tab:mech-glc}）と、IRBL が untrusted に付けた重み（表~\ref{tab:mech-irbl}）を調べた。
+
+\paragraph{遷移行列の推定}
+真の遷移行列の対角成分の平均は \MechLRTrueDiag{} であるのに対し、\method{naive} から推定した値は LR で \MechLRNaiveDiag{}、HGB で \MechHGBNaiveDiag{} であった。
+\texttt{gold} 推定は $\mathcal{U}$ で学習した分類器を用いるため、推定値が反映するのはデータ全体ではなく $\mathcal{U}$ のノイズである。
+\method{naive} の $\mathcal{U}$ で正しいラベルの割合は LR で \MechLRNaiveUClean{}、HGB で \MechHGBNaiveUClean{} しかなく、推定値はそれをさらに下回った。
+$\mathcal{U} = \mathcal{I}$ はモデルの予測と観測ラベルが食い違ったサンプルだけからなるため、$\mathcal{U}$ で学習した分類器は $\mathcal{T}$ のラベルとは逆の対応を学びやすい。
+このためノイズが実際より大幅に多いと推定され、その補正が予測を誤った方向へ書き換えたと考えられる。
+\method{random} では $\mathcal{U}$ に誤り判定のないサンプルが混ざることで $\mathcal{U}$ の正ラベル率が \MechLRRandomUClean{} に上がり、推定値も LR \MechLRRandomDiag{}、HGB \MechHGBRandomDiag{} に改善した。
+
+本物の trusted を与えても、推定値は $\mathcal{U}$ の正ラベル率（\MechLROracleTenUClean{}）を下回った（LR で \MechLROracleTenDiag{}、HGB で \MechHGBOracleTenDiag{}）。
+trusted を 30\% にしても推定値はほぼ変わらなかった（LR \MechLROracleThirtyDiag{}、HGB \MechHGBOracleThirtyDiag{}）。
+\texttt{gold} 推定は、$\mathcal{U}$ で学習した分類器がノイズ付きラベルの事後確率を正確に表すことを前提とする。
+分類器の予測確率が真のクラスに集中しないと、ノイズがなくても対角成分は 1 より小さく推定されるため、分類器自身の誤差がノイズとして上乗せされると考えられる。
+LR で過小推定が大きく、表現力の高い HGB で小さいことはこの解釈と整合する。
+ただし HGB では推定値が真値に近いにもかかわらず GLC の精度低下は LR より大きく（表~\ref{tab:oracle}）、推定のずれだけでは説明できない。
+補正後の学習との相互作用など別の要因があると考えられるが、本研究では特定していない。
+
+\paragraph{IRBL の重み}
+IRBL は \method{naive} の untrusted のうち、実際に誤ったラベルに平均 LR \MechLRWNoisy{}・HGB \MechHGBWNoisy{}、実際には正しいラベルに平均 LR \MechLRWClean{}・HGB \MechHGBWClean{} の重みを付けた。
+つまり IRBL は誤り判定サンプルを一律に捨てるのではなく、\cl{} の誤検出（正しいのに誤りと判定されたサンプル）を拾い直していた。
+これが \method{cl\_prune} に対するわずかな優位の理由と考えられる。
+重みの絶対値はモデルによって異なるが、正しいラベルと誤ったラベルの重みの比は \method{naive}（LR 6.1 倍、HGB 5.6 倍）、\method{random}（3.4 倍、4.9 倍）、\method{topconf}（2.6 倍、4.1 倍）の順に小さくなった。
+\method{topconf} では trusted が簡単なサンプルに偏るため、IRBL が誤ラベルと「難しいが正しいラベル」を区別しにくくなったと考えられ、RQ2 の結果と整合する。
+
+LR の instance 40\% では、\method{naive} の untrusted の誤ったラベルに付いた重みは平均 0.80 であり、symmetric（0.04--0.09）と比べてほとんど下がらなかった。
+instance ノイズは LR にとって自然に見える誤りであり、\method{naive} の trusted にも 24\% の誤ラベルが残るため、IRBL は誤りを見分けられない。
+これが同条件で \method{bq/naive/irbl} が \method{cl\_prune} を下回った理由と考えられる。
+
+\begin{table}[tbp]
+  \centering
+  \caption{GLC（\texttt{gold}）が推定した遷移行列の対角成分の平均と、untrusted の正しいラベルの割合（3 データセット $\times$ 5 シードの平均）。真値はデータ全体の真の遷移行列の対角成分をクラスについて単純平均した値 $\frac{1}{K}\sum_{k} T_{kk}$ である。instance ノイズでは誤りやすいクラスに反転が偏るため、サンプル単位のノイズ率 $\rho$ とは一致しない。}
+  \label{tab:mech-glc}
+  \scriptsize
+  \setlength{\tabcolsep}{3.5pt}
+  \input{tables/ja/mechanism_glc.tex}
+\end{table}
+
+\begin{table}[tbp]
+  \centering
+  \caption{IRBL が untrusted に付けた重みの平均（3 データセット $\times$ 5 シードの平均）。誤・正は、untrusted のうち実際に誤ったラベル・正しいラベルのサンプル。}
+  \label{tab:mech-irbl}
+  \footnotesize
+  \input{tables/ja/mechanism_irbl.tex}
+\end{table}
+
+\section{考察}\label{sec:discussion}
+
+\paragraph{RQ1：疑似バイクオリティ化は除去より良いか}
+重み付け系、特に IRBL と組み合わせた場合に限り、除去をわずかに上回った。
+改善幅は 0.3--0.5~pt と小さく、学習時間は約 3 倍となる。
+\cl{} 標準の \texttt{CleanLearning} は除去されるサンプルが同一でクラスごとの再重み付けを加えるだけだが、\method{cl\_prune} を上回らなかった。
+ノイズ率がクラスによらない symmetric ノイズで LR の劣後が最も大きかったことから、推定されたクラス別ノイズ率のばらつきが不要なクラス間の偏りを持ち込んだ可能性がある。
+したがって、\method{bq/naive/irbl} の優位は再重み付けの有無では説明できず、誤検出されたサンプルを個別に拾い直す点にあると考えられる。
+
+ただし、\method{naive} の優位には trusted の大きさも寄与している。
+\method{naive} の $\mathcal{T}$ は学習データの過半を占めるのに対し、\method{random} は約 30\% である。
+$\mathcal{T}$ のみの学習に対する IRBL の上積みは \method{random} の方が大きかったことから、IRBL の重み付け自体は小さい $\mathcal{T}$ でも機能し、\method{naive} の利点は主に $\mathcal{T}$ の大きさにあると考えられる。
+遷移行列系との組み合わせは避けるべきである。
+
+\paragraph{RQ2：trusted の選び方}
+品質スコアの上位を trusted とする \method{topconf} は、trusted の誤ラベル率を下げたにもかかわらず精度を下げた。
+trusted が「モデルにとって簡単なサンプル」に偏ると、重み付け系は「簡単か難しいか」を手がかりに重みを付けてしまい、難しいが正しいサンプルの重みが下がると考えられる。
+IRBL の重みの実測（表~\ref{tab:mech-irbl}）もこれを支持する。
+確信度による選別が学習しやすいサンプルに偏り、曖昧なサンプルが汎化に寄与するという Dataset Cartography~\cite{swayamdipta2020cartography} の知見とも整合する。
+疑似 trusted を作る際は、ラベルのきれいさよりも、untrusted と同じ分布に従うことを優先すべきである。
+
+ただしこの傾向はデータセットに依存した（付録の表~\ref{tab:dataset-all}）。
+クラス比の偏りが大きい covtype の LR では、学習データの 30\% に絞る分割はいずれも \method{baseline} を下回り（\method{bq/random/irbl} $-$0.53、\method{bq/random/trusted\_only} $-$1.14~pt）、正の改善は \method{bq/naive/irbl}（+0.53）と \method{cl\_prune}（+0.14）に限られた。
+一方 digits の LR では \method{bq/topconf/irbl}（+7.01）が \method{bq/random/irbl}（+5.41）を上回った。
+trusted を絞ることの不利と選択バイアスの影響は、データの構造やクラス比と相互作用すると考えられる。
+
+\paragraph{RQ3：品質スコアの重み・特徴量としての利用}
+重みとしての利用は除去と同等か劣り、利点は見られなかった。
+特徴量としての利用は HGB では除去と同程度に機能したが、LR では大きく劣化した。
+これには 3 つの要因が考えられる。
+第 1 に、多クラスのロジスティック回帰に $s$ を加法的に結合すると、クラス $c$ のロジットは $w_c^\top x + w_{c,s} s + b_c$ となり、$s$ はロジットを $x$ と無関係にずらすことしかできない。
+このため「ラベルが信頼できるときの決定境界」を表現できない。
+これは交互作用項（$s x$ など）を持たない加法的な結合に固有の制約であり、交互作用を明示的に加えれば線形モデルでも表現できる。
+第 2 に、学習時の $s$ は 1 より小さい値に広く分布するのに対し、推論時には一律に $s=1$ を与える。
+学習時に平均的な $s$ の高いクラスに正の $w_{c,s}$ が付くと、推論時には $w_{c,s}(1 - \bar{s})$ に相当する定数がクラスごとの切片に加わり、予測がそれらのクラスへ偏る可能性がある。
+LR が symmetric ノイズでも大きく劣化した（20\% で $-$5.31、40\% で $-$10.40~pt）ことは、この切片のずれと整合する。
+第 3 に、HGB では $s$ による分岐（$s > \theta$）が、推論時に $s=1$ の側の、確信度の高い学習サンプルで作られた部分木へ入力を導く。
+これは確信度に条件付けた決定境界を学ぶというより、木の内部での暗黙の除去として働いていると考えられる。
+これらの説明は本研究では直接検証していない。
+
+\paragraph{実務への示唆}
+人手を一切使わないのであれば、\cl{} による除去が手軽さと効果の釣り合いの点で第一の選択肢である。
+本実験の範囲では、\texttt{CleanLearning} のクラス別の再重み付けに上積みは見られなかった。
+計算時間に余裕があれば、\method{naive} 分割と IRBL の組み合わせでわずかな上積みが期待できる。
+一方、学習データの 30\% を人手で確認できれば、IRBL は自動の最良手法を平均で約 4--5~pt 上回り、勝率も高い（LR \PLROracleThirtyVsNaiveIrblWin\%、HGB \PHGBOracleThirtyVsNaiveIrblWin\%）。
+10\% の確認では平均では上回るものの勝率は半数に満たないが、系統的なノイズが多い場合（pair 40\%）には自動の手法を 13--14~pt 上回った。
+ノイズの性質が不明な場合は、少量の無作為サンプルを確認してノイズ率と傾向を把握する価値がある。
+
+\section{限界}\label{sec:limit}
+\begin{itemize}
+  \item ノイズはすべて合成である。特に instance ノイズは LR で生成したため、LR にとって検出しにくい方向に偏っており、LR と HGB で条件が対称でない。
+  \item データセットは表形式の小中規模のもの 3 つに限られ、画像やテキストと深層学習モデルは扱っていない。trusted を絞る分割の効果はデータセットによって異なり（covtype と digits）、3 つのデータセットからの一般化には限界がある。
+  \item ハイパーパラメータ（$\tau$、\cl{} の判定方式、各アルゴリズムの設定）は調整しておらず、$\tau = 0.3$ の 1 点のみを評価した。
+  \item HGB の学習率は、当初テストデータを参照して選んだ。学習データ内の交差検証で同じ選択になることを事後的に確認したが、選択の過程自体はテストデータに依存していた。
+  \item 遷移行列系が本物の trusted でも弱い原因は、\texttt{gold} 推定の過小推定と少数クラスの影響までは確認したが、HGB での劣化の要因は特定していない。
+  \item \texttt{CleanLearning} の学習時間は、内部で誤り判定を再実行する処理を含むため他の手法と比較できず、報告していない。
+  \item 信頼区間は条件間の相関を考慮していない。
+\end{itemize}
+
+\section{おわりに}
+\cl{} の出力から trusted / untrusted を自動で作り \bq{} に入力する疑似バイクオリティ化を、\NCond{} 条件 $\times$ 2 モデルで評価した。
+IRBL との組み合わせは除去と \texttt{CleanLearning} をわずかに上回ったが、その利点の一部は trusted の大きさによるものであった。
+遷移行列系との組み合わせは大きく崩れ、その原因は untrusted への誤ラベルの集中による遷移行列の過小推定として実測で確認できた。
+trusted の選び方では、ラベルのきれいさよりも分布の偏りの少なさが重要であった。
+一方、同じ大きさの trusted を人手で確認した場合との差は大きく、人手を完全に省くことの代償は小さくない。
+今後は、実データのノイズでの検証、trusted の比率と選び方の系統的な探索、そして少量の人手確認と \cl{} を組み合わせる半自動の方式の検討が課題である。
+
+\printbibliography[title=参考文献]
+
+\appendix
+\clearpage
+\section{詳細結果}
+
+\begin{table}[htbp]
+  \centering
+  \caption{ノイズの種類と率ごとの $\Delta$（pt、全手法）。先頭行は \method{baseline} の精度（\%）。}
+  \label{tab:noise-all}
+  \scriptsize
+  \setlength{\tabcolsep}{4pt}
+  \input{tables/ja/by_noise_all.tex}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{データセットごとの $\Delta$（pt、全手法、3 ノイズ $\times$ 2 率 $\times$ 5 シードの平均）。先頭行は \method{baseline} の精度（\%）。}
+  \label{tab:dataset-all}
+  \scriptsize
+  \input{tables/ja/by_dataset_all.tex}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{HGB の学習率の確認。各シードの学習データ内での 5 分割交差検証の精度（\%、真のラベル、テストデータは不使用）。5 シードの平均（最小--最大）。}
+  \label{tab:hgb-lr}
+  \footnotesize
+  \input{tables/ja/hgb_lr.tex}
+\end{table}
+
+\clearpage
+\section{再現方法}
+コードは \texttt{label-noise-experiment/} にある。
+以下のコマンドで本稿のすべての実験を実行し、表・図・本文中の数値を再生成できる。
+図~\ref{fig:delta}、すべての表、本文中の数値のマクロ（\texttt{latex/numbers.tex}）は \texttt{export\_latex} が生成する。
+ループ（両モデル分）と \texttt{hgb\_lr\_check} は、まとめて \texttt{sh rerun\_all.sh} でも実行できる。
+\begin{verbatim}
+for m in lr hgb; do
+  uv run python -m label_noise_experiment.run --model $m
+  uv run python -m label_noise_experiment.oracle_check --model $m --oracle-frac 0.1
+  uv run python -m label_noise_experiment.oracle_check --model $m --oracle-frac 0.3
+  uv run python -m label_noise_experiment.mechanism --model $m
+done
+uv run python -m label_noise_experiment.hgb_lr_check
+uv run python -m label_noise_experiment.export_latex
+wsl sh latex/build.sh    # PDF のビルド（Docker の texlive/texlive イメージ、英語版と日本語版）
+\end{verbatim}
+
+\end{document}

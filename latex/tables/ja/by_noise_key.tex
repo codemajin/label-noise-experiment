@@ -1,0 +1,45 @@
+\begin{tabular}{lrrrrrr}
+\toprule
+\multicolumn{7}{l}{\textbf{LR}} \\
+ & \multicolumn{2}{c}{symmetric} & \multicolumn{2}{c}{pair} & \multicolumn{2}{c}{instance} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+ & 20\% & 40\% & 20\% & 40\% & 20\% & 40\% \\
+\midrule
+\textit{baseline 精度 (\%)} & 77.91 & 75.63 & 73.27 & 58.20 & 78.35 & 75.51 \\
+\addlinespace
+\texttt{oracle\_clean} & +3.19 & +5.47 & +7.83 & +22.90 & +2.74 & +5.58 \\
+\texttt{oracle\_trusted10/irbl} & +0.25 & +2.26 & +5.36 & +19.94 & $-$1.33 & +0.39 \\
+\texttt{oracle\_trusted30/irbl} & +2.33 & +4.37 & +7.17 & +21.95 & +1.07 & +2.93 \\
+\texttt{cl\_prune} & +1.61 & +2.21 & +4.54 & +3.87 & +0.70 & +0.76 \\
+\texttt{cl\_cleanlearning} & +0.64 & +0.68 & +4.17 & +2.92 & +0.46 & +0.30 \\
+\texttt{bq/naive/irbl} & +1.92 & +2.16 & +5.37 & +6.91 & +0.19 & $-$0.18 \\
+\texttt{bq/random/irbl} & +1.83 & +2.15 & +5.25 & +5.33 & +0.04 & $-$0.50 \\
+\texttt{bq/topconf/irbl} & $-$0.38 & +0.14 & +3.01 & +3.26 & $-$1.12 & $-$0.73 \\
+\texttt{bq/naive/kpdr} & +0.86 & +0.74 & +4.39 & +5.77 & $-$0.48 & $-$0.18 \\
+\texttt{cl\_weight/self\_confidence} & +2.31 & +2.98 & +3.78 & +3.17 & +1.00 & +0.67 \\
+\texttt{cl\_feature} & $-$5.31 & $-$10.40 & $-$6.07 & $-$8.97 & $-$1.66 & $-$2.76 \\
+\texttt{bq/random/glc} & $-$7.05 & $-$6.73 & $-$1.49 & $-$8.55 & $-$1.59 & $-$0.78 \\
+\texttt{bq/naive/glc} & $-$38.60 & $-$32.27 & $-$32.78 & $-$25.11 & $-$9.75 & $-$7.66 \\
+\midrule
+\multicolumn{7}{l}{\textbf{HGB}} \\
+ & \multicolumn{2}{c}{symmetric} & \multicolumn{2}{c}{pair} & \multicolumn{2}{c}{instance} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+ & 20\% & 40\% & 20\% & 40\% & 20\% & 40\% \\
+\midrule
+\textit{baseline 精度 (\%)} & 85.61 & 78.68 & 82.35 & 61.36 & 81.64 & 71.91 \\
+\addlinespace
+\texttt{oracle\_clean} & +3.26 & +10.19 & +6.52 & +27.51 & +7.23 & +16.96 \\
+\texttt{oracle\_trusted10/irbl} & $-$0.45 & +4.44 & +2.61 & +21.40 & +0.15 & +5.68 \\
+\texttt{oracle\_trusted30/irbl} & +1.68 & +6.69 & +4.18 & +24.22 & +3.69 & +10.90 \\
+\texttt{cl\_prune} & +0.51 & +5.23 & +2.99 & +7.13 & +0.46 & +3.19 \\
+\texttt{cl\_cleanlearning} & +0.46 & +5.07 & +2.85 & +6.70 & +0.83 & +3.23 \\
+\texttt{bq/naive/irbl} & +1.29 & +5.27 & +3.73 & +7.48 & +0.92 & +2.67 \\
+\texttt{bq/random/irbl} & +0.76 & +4.85 & +3.19 & +7.36 & +0.23 & +2.93 \\
+\texttt{bq/topconf/irbl} & $-$0.55 & +4.11 & +2.09 & +7.06 & $-$0.83 & +2.61 \\
+\texttt{bq/naive/kpdr} & +0.72 & +3.14 & +2.89 & +6.06 & $-$0.18 & +1.74 \\
+\texttt{cl\_weight/self\_confidence} & +0.88 & +3.61 & +2.16 & +3.09 & +0.78 & +1.43 \\
+\texttt{cl\_feature} & $-$0.46 & +4.51 & +2.63 & +9.97 & +0.34 & +3.74 \\
+\texttt{bq/random/glc} & $-$11.19 & $-$18.30 & $-$16.12 & $-$15.62 & $-$6.65 & $-$3.18 \\
+\texttt{bq/naive/glc} & $-$53.12 & $-$40.74 & $-$52.48 & $-$26.30 & $-$26.29 & $-$21.20 \\
+\bottomrule
+\end{tabular}

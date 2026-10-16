@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Downloaded datasets (fetched automatically by scikit-learn)
+data/
+
+# Logs
+logs/
+*.log
+
+# Scratch and superseded results
+results_smoke/
+results_v1/
+
+# LaTeX build artifacts (latexmk writes everything to latex/build/)
+latex/build/

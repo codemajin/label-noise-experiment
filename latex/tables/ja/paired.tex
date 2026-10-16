@@ -1,0 +1,20 @@
+\begin{tabular}{llrrrr}
+\toprule
+ & & \multicolumn{2}{c}{LR} & \multicolumn{2}{c}{HGB} \\
+\cmidrule(lr){3-4} \cmidrule(lr){5-6}
+手法 A & 手法 B & A$-$B (95\% CI) & A 勝率 & A$-$B (95\% CI) & A 勝率 \\
+\midrule
+\texttt{bq/naive/irbl} & \texttt{cl\_prune} & +0.45 {\scriptsize$\pm$0.36} & 64 & +0.31 {\scriptsize$\pm$0.24} & 71 \\
+\texttt{bq/naive/irbl} & \texttt{cl\_cleanlearning} & +1.20 {\scriptsize$\pm$0.40} & 76 & +0.37 {\scriptsize$\pm$0.24} & 72 \\
+\texttt{cl\_cleanlearning} & \texttt{cl\_prune} & $-$0.75 {\scriptsize$\pm$0.22} & 17 & $-$0.06 {\scriptsize$\pm$0.17} & 37 \\
+\texttt{bq/random/irbl} & \texttt{bq/random/trusted\_only} & +0.58 {\scriptsize$\pm$0.27} & 80 & +1.91 {\scriptsize$\pm$0.33} & 88 \\
+\texttt{bq/naive/irbl} & \texttt{bq/random/irbl} & +0.38 {\scriptsize$\pm$0.24} & 66 & +0.34 {\scriptsize$\pm$0.28} & 68 \\
+\texttt{bq/random/irbl} & \texttt{bq/topconf/irbl} & +1.65 {\scriptsize$\pm$0.76} & 72 & +0.80 {\scriptsize$\pm$0.35} & 69 \\
+\texttt{bq/random/trusted\_only} & \texttt{bq/topconf/trusted\_only} & +2.13 {\scriptsize$\pm$0.85} & 70 & +2.24 {\scriptsize$\pm$0.50} & 86 \\
+\texttt{cl\_weight/self\_confidence} & \texttt{cl\_prune} & +0.04 {\scriptsize$\pm$0.28} & 57 & $-$1.26 {\scriptsize$\pm$0.47} & 30 \\
+\texttt{cl\_feature} & \texttt{cl\_prune} & $-$8.14 {\scriptsize$\pm$1.14} & 2 & +0.21 {\scriptsize$\pm$0.50} & 47 \\
+\texttt{oracle\_trusted10/irbl} & \texttt{bq/naive/irbl} & +1.75 {\scriptsize$\pm$1.32} & 41 & +2.08 {\scriptsize$\pm$1.29} & 44 \\
+\texttt{oracle\_trusted30/irbl} & \texttt{bq/naive/irbl} & +3.91 {\scriptsize$\pm$1.35} & 72 & +5.00 {\scriptsize$\pm$1.38} & 92 \\
+\texttt{oracle\_trusted30/irbl} & \texttt{oracle\_trusted10/irbl} & +2.16 {\scriptsize$\pm$0.32} & 99 & +2.92 {\scriptsize$\pm$0.58} & 96 \\
+\bottomrule
+\end{tabular}
